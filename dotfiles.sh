@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 echo "This is my script."
 ls -l
 
