@@ -2,57 +2,53 @@
 set -e
 
 # ==========================
-# 設定値セクション
+# Configuration Section
 # ==========================
 HOSTNAME="myarch"
 TIMEZONE="Asia/Tokyo"
-LOCALE_LANG="ja_JP.UTF-8"
-KEYMAP="jp106"
+LOCALE_LANG="en_US.UTF-8"
+KEYMAP="us"
 EXTRA_PACKAGES="xorg-server xorg-xinit xorg-apps xf86-input-libinput \
 lxqt lxqt-arch-config lxqt-policykit lxqt-session lxqt-admin \
 openbox obconf sddm pcmanfm-qt qterminal featherpad \
 ttf-dejavu ttf-liberation noto-fonts pipewire pipewire-pulse pavucontrol"
 # ==========================
-# ここまで設定値セクション
-# ==========================
 
-# インストール先ディスクの選択
-echo "インストール先ディスクを入力してください（例: /dev/sda, /dev/nvme0n1）:"
+# Select installation disk
+echo "Enter the installation disk (e.g., /dev/sda, /dev/nvme0n1):"
 read DISK
 if [ ! -b "$DISK" ]; then
-    echo "エラー: 指定されたディスク $DISK は存在しません。"
+    echo "Error: The specified disk $DISK does not exist."
     exit 1
 fi
 
-echo "スワップパーティションを作成しますか？ (yes/no)"
+echo "Do you want to create a swap partition? (yes/no)"
 read MAKE_SWAP
 if [ "$MAKE_SWAP" = "yes" ]; then
-    SWAP_SIZE="2G"  # 必要に応じて変更
+    SWAP_SIZE="2G"  # Change if needed
 else
     SWAP_SIZE=""
 fi
 
 echo "-------------------------"
-echo "ディスク: $DISK"
+echo "Disk: $DISK"
 if [ "$MAKE_SWAP" = "yes" ]; then
-    echo "スワップ: 作成 ($SWAP_SIZE)"
+    echo "Swap: Will be created ($SWAP_SIZE)"
 else
-    echo "スワップ: 作成しない"
+    echo "Swap: Will NOT be created"
 fi
-echo "続行すると $DISK のデータは全て消去されます。本当によろしいですか？(yes/no)"
+echo "WARNING: All data on $DISK will be erased. Continue? (yes/no)"
 read confirmation
 if [ "$confirmation" != "yes" ]; then
-    echo "中断しました。"
+    echo "Aborted."
     exit 1
 fi
 
 # ==========================
-# パーティション自動作成
+# Automatic Partitioning
 # ==========================
-# 既存パーティション全削除
 sgdisk --zap-all "$DISK"
 
-# EFI 512MiB, SWAP (任意), 残り全部root
 if [ "$MAKE_SWAP" = "yes" ]; then
     sgdisk -n 1:0:+512M -t 1:ef00 -c 1:"EFI System Partition" \
            -n 2:0:-${SWAP_SIZE} -t 2:8300 -c 2:"Linux root" \
@@ -69,29 +65,29 @@ else
 fi
 
 partprobe "$DISK"
-sleep 2  # デバイス認識待ち
+sleep 2  # Wait for device nodes
 
 # ==========================
-# ユーザー名とパスワードの入力
+# Username and Password
 # ==========================
-echo -n "作成するユーザー名を入力してください: "
+echo -n "Enter the username to create: "
 read USERNAME
 while true; do
-    echo -n "${USERNAME} のパスワードを入力してください: "
+    echo -n "Enter password for ${USERNAME}: "
     read -s PASSWORD
     echo
-    echo -n "パスワードを再入力してください: "
+    echo -n "Re-enter password: "
     read -s PASSWORD_CONFIRM
     echo
     if [ "$PASSWORD" == "$PASSWORD_CONFIRM" ]; then
         break
     else
-        echo "パスワードが一致しません。もう一度入力してください。"
+        echo "Passwords do not match. Please try again."
     fi
 done
 
 # ==========================
-# ファイルシステム作成
+# Filesystem Creation
 # ==========================
 mkfs.fat -F32 "$EFI_PARTITION"
 mkfs.ext4 "$ROOT_PARTITION"
@@ -101,14 +97,14 @@ if [ -n "$SWAP_PARTITION" ]; then
 fi
 
 # ==========================
-# マウント
+# Mount
 # ==========================
 mount "$ROOT_PARTITION" /mnt
 mkdir -p /mnt/boot/efi
 mount "$EFI_PARTITION" /mnt/boot/efi
 
 # ==========================
-# ベースシステムのインストール
+# Base System Installation
 # ==========================
 timedatectl set-ntp true
 pacman -Sy reflector --noconfirm --needed
@@ -117,7 +113,7 @@ pacstrap /mnt base base-devel linux linux-firmware grub efibootmgr networkmanage
 genfstab -U /mnt >> /mnt/etc/fstab
 
 # ==========================
-# chroot用スクリプトを作成
+# Create chroot setup script
 # ==========================
 cat <<EOF > /mnt/root/chroot-setup.sh
 #!/bin/bash
@@ -171,18 +167,18 @@ rm -rf yay
 yay -S --noconfirm google-chrome
 '
 
-echo "chroot内セットアップ完了。"
+echo "Chroot setup complete."
 EOF
 
 chmod +x /mnt/root/chroot-setup.sh
 
 arch-chroot /mnt /root/chroot-setup.sh
 
-echo "インストールが完了しました。アンマウントして再起動しますか？(yes/no)"
+echo "Installation is complete. Unmount and reboot? (yes/no)"
 read reboot_confirmation
 if [ "$reboot_confirmation" == "yes" ]; then
     umount -R /mnt
     reboot
 else
-    echo "手動で umount -R /mnt && reboot を実行してください。"
+    echo "Please run 'umount -R /mnt && reboot' manually."
 fi
