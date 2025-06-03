@@ -197,6 +197,7 @@ echo "Configuring sudo for wheel group..."
 sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
 
 echo "Installing additional packages: \${EXTRA_PACKAGES}..."
+echo "Enabling essential services (sddm, NetworkManager)..."
 pacman -S --noconfirm --needed sddm ${EXTRA_PACKAGES}
 
 systemctl enable sddm
