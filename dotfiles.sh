@@ -11,10 +11,8 @@ swapon /dev/sda3
 mount /dev/sda2 /mnt
 mkdir -p /mnt/boot/efi
 mount /dev/sda1 /mnt/boot/efi
-swapon /dev/sda3
 
 # fstab生成
-mkdir -p /mnt/etc
 genfstab -U /mnt >> /mnt/etc/fstab
 
 # chroot用スクリプトを作成
@@ -26,8 +24,6 @@ pacman -Syu --noconfirm
 pacman -S --noconfirm grub efibootmgr
 
 grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck
-mkdir -p /boot/efi/boot
-cp /boot/efi/GRUB/grubx64.efi /boot/efi/boot/bootx64.efi
 grub-mkconfig -o /boot/grub/grub.cfg
 
 pacman -S --noconfirm xorg-server xorg-xinit xorg-apps xf86-input-libinput \
@@ -43,7 +39,8 @@ echo "archuser:password123" | chpasswd
 sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
 
 pacman -S --needed --noconfirm git base-devel
-sudo -u archuser bash -c "
+
+sudo -u archuser bash -c '
 cd ~
 git clone https://aur.archlinux.org/yay.git
 cd yay
@@ -51,7 +48,7 @@ makepkg -si --noconfirm
 cd ..
 rm -rf yay
 yay -S --noconfirm google-chrome
-"
+'
 EOF
 
 chmod +x /mnt/root/chroot-setup.sh
