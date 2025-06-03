@@ -4,8 +4,19 @@ set -e
 # ==========================
 # 設定値セクション
 # ==========================
+HOSTNAME="myarch"
+TIMEZONE="Asia/Tokyo"
+LOCALE_LANG="ja_JP.UTF-8"
+KEYMAP="jp106"
+EXTRA_PACKAGES="xorg-server xorg-xinit xorg-apps xf86-input-libinput \
+lxqt lxqt-arch-config lxqt-policykit lxqt-session lxqt-admin \
+openbox obconf sddm pcmanfm-qt qterminal featherpad \
+ttf-dejavu ttf-liberation noto-fonts pipewire pipewire-pulse pavucontrol"
+# ==========================
+# ここまで設定値セクション
+# ==========================
 
-# ディスクとパーティションの選択
+# インストール先ディスクの選択
 echo "インストール先ディスクを入力してください（例: /dev/sda, /dev/nvme0n1）:"
 read DISK
 if [ ! -b "$DISK" ]; then
@@ -13,44 +24,56 @@ if [ ! -b "$DISK" ]; then
     exit 1
 fi
 
-echo "EFIパーティション（例: ${DISK}1）を入力してください:"
-read EFI_PARTITION
-if [ ! -b "$EFI_PARTITION" ]; then
-    echo "エラー: 指定されたパーティション $EFI_PARTITION は存在しません。"
-    exit 1
+echo "スワップパーティションを作成しますか？ (yes/no)"
+read MAKE_SWAP
+if [ "$MAKE_SWAP" = "yes" ]; then
+    SWAP_SIZE="2G"  # 必要に応じて変更
+else
+    SWAP_SIZE=""
 fi
 
-echo "ルートパーティション（例: ${DISK}2）を入力してください:"
-read ROOT_PARTITION
-if [ ! -b "$ROOT_PARTITION" ]; then
-    echo "エラー: 指定されたパーティション $ROOT_PARTITION は存在しません。"
+echo "-------------------------"
+echo "ディスク: $DISK"
+if [ "$MAKE_SWAP" = "yes" ]; then
+    echo "スワップ: 作成 ($SWAP_SIZE)"
+else
+    echo "スワップ: 作成しない"
+fi
+echo "続行すると $DISK のデータは全て消去されます。本当によろしいですか？(yes/no)"
+read confirmation
+if [ "$confirmation" != "yes" ]; then
+    echo "中断しました。"
     exit 1
 fi
-
-echo "スワップパーティション（例: ${DISK}3、スワップ不要なら空Enter）を入力してください:"
-read SWAP_PARTITION
-if [ -n "$SWAP_PARTITION" ] && [ ! -b "$SWAP_PARTITION" ]; then
-    echo "エラー: 指定されたパーティション $SWAP_PARTITION は存在しません。"
-    exit 1
-fi
-
-# システム設定
-HOSTNAME="myarch"
-TIMEZONE="Asia/Tokyo"
-LOCALE_LANG="ja_JP.UTF-8"
-KEYMAP="jp106"
-
-# インストールする追加パッケージ
-EXTRA_PACKAGES="xorg-server xorg-xinit xorg-apps xf86-input-libinput \
-lxqt lxqt-arch-config lxqt-policykit lxqt-session lxqt-admin \
-openbox obconf sddm pcmanfm-qt qterminal featherpad \
-ttf-dejavu ttf-liberation noto-fonts pipewire pipewire-pulse pavucontrol"
 
 # ==========================
-# ここまで設定値セクション
+# パーティション自動作成
 # ==========================
+# 既存パーティション全削除
+sgdisk --zap-all "$DISK"
 
+# EFI 512MiB, SWAP (任意), 残り全部root
+if [ "$MAKE_SWAP" = "yes" ]; then
+    sgdisk -n 1:0:+512M -t 1:ef00 -c 1:"EFI System Partition" \
+           -n 2:0:-${SWAP_SIZE} -t 2:8300 -c 2:"Linux root" \
+           -n 3:0:0 -t 3:8200 -c 3:"Linux swap" "$DISK"
+    EFI_PARTITION="${DISK}1"
+    ROOT_PARTITION="${DISK}2"
+    SWAP_PARTITION="${DISK}3"
+else
+    sgdisk -n 1:0:+512M -t 1:ef00 -c 1:"EFI System Partition" \
+           -n 2:0:0 -t 2:8300 -c 2:"Linux root" "$DISK"
+    EFI_PARTITION="${DISK}1"
+    ROOT_PARTITION="${DISK}2"
+    SWAP_PARTITION=""
+fi
+
+partprobe "$DISK"
+sleep 2  # デバイス認識待ち
+
+# ==========================
 # ユーザー名とパスワードの入力
+# ==========================
 echo -n "作成するユーザー名を入力してください: "
 read USERNAME
 while true; do
@@ -67,54 +90,35 @@ while true; do
     fi
 done
 
-# 確認表示
-echo "-------------------------"
-echo "インストール設定内容を確認してください："
-echo "ディスク: ${DISK}"
-echo "EFIパーティション: ${EFI_PARTITION}"
-echo "ルートパーティション: ${ROOT_PARTITION}"
-echo "スワップパーティション: ${SWAP_PARTITION:-なし}"
-echo "ホスト名: ${HOSTNAME}"
-echo "タイムゾーン: ${TIMEZONE}"
-echo "ロケール: ${LOCALE_LANG}"
-echo "キーマップ: ${KEYMAP}"
-echo "追加パッケージ: ${EXTRA_PACKAGES}"
-echo "ユーザー名: ${USERNAME}"
-echo "-------------------------"
-echo "続行すると ${DISK} のデータは全て消去されます。本当によろしいですか？(yes/no)"
-read confirmation
-if [ "$confirmation" != "yes" ]; then
-    echo "中断しました。"
-    exit 1
+# ==========================
+# ファイルシステム作成
+# ==========================
+mkfs.fat -F32 "$EFI_PARTITION"
+mkfs.ext4 "$ROOT_PARTITION"
+if [ -n "$SWAP_PARTITION" ]; then
+    mkswap "$SWAP_PARTITION"
+    swapon "$SWAP_PARTITION"
 fi
 
-# システムクロックの設定
-timedatectl set-ntp true
+# ==========================
+# マウント
+# ==========================
+mount "$ROOT_PARTITION" /mnt
+mkdir -p /mnt/boot/efi
+mount "$EFI_PARTITION" /mnt/boot/efi
 
-# ミラーリスト最適化
+# ==========================
+# ベースシステムのインストール
+# ==========================
+timedatectl set-ntp true
 pacman -Sy reflector --noconfirm --needed
 reflector --country Japan --age 12 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
-
-# パーティションのフォーマット
-mkfs.fat -F32 "${EFI_PARTITION}"
-mkfs.ext4 "${ROOT_PARTITION}"
-if [ -n "$SWAP_PARTITION" ]; then
-    mkswap "${SWAP_PARTITION}"
-    swapon "${SWAP_PARTITION}"
-fi
-
-# マウント
-mount "${ROOT_PARTITION}" /mnt
-mkdir -p /mnt/boot/efi
-mount "${EFI_PARTITION}" /mnt/boot/efi
-
-# ベースシステムのインストール
 pacstrap /mnt base base-devel linux linux-firmware grub efibootmgr networkmanager sudo git vim
-
-# fstab生成
 genfstab -U /mnt >> /mnt/etc/fstab
 
+# ==========================
 # chroot用スクリプトを作成
+# ==========================
 cat <<EOF > /mnt/root/chroot-setup.sh
 #!/bin/bash
 set -e
@@ -172,10 +176,8 @@ EOF
 
 chmod +x /mnt/root/chroot-setup.sh
 
-# chrootでセットアップ実行
 arch-chroot /mnt /root/chroot-setup.sh
 
-# 後処理
 echo "インストールが完了しました。アンマウントして再起動しますか？(yes/no)"
 read reboot_confirmation
 if [ "$reboot_confirmation" == "yes" ]; then
