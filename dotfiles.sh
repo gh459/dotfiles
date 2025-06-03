@@ -4,17 +4,41 @@ set -e
 # ==========================
 # 設定値セクション
 # ==========================
-# ディスクとパーティション
-DISK="/dev/sda"             # インストール先ディスク
-EFI_PARTITION="${DISK}1"    # EFIシステムパーティション
-ROOT_PARTITION="${DISK}2"   # ルートパーティション
-SWAP_PARTITION="${DISK}3"   # スワップパーティション
+
+# ディスクとパーティションの選択
+echo "インストール先ディスクを入力してください（例: /dev/sda, /dev/nvme0n1）:"
+read DISK
+if [ ! -b "$DISK" ]; then
+    echo "エラー: 指定されたディスク $DISK は存在しません。"
+    exit 1
+fi
+
+echo "EFIパーティション（例: ${DISK}1）を入力してください:"
+read EFI_PARTITION
+if [ ! -b "$EFI_PARTITION" ]; then
+    echo "エラー: 指定されたパーティション $EFI_PARTITION は存在しません。"
+    exit 1
+fi
+
+echo "ルートパーティション（例: ${DISK}2）を入力してください:"
+read ROOT_PARTITION
+if [ ! -b "$ROOT_PARTITION" ]; then
+    echo "エラー: 指定されたパーティション $ROOT_PARTITION は存在しません。"
+    exit 1
+fi
+
+echo "スワップパーティション（例: ${DISK}3、スワップ不要なら空Enter）を入力してください:"
+read SWAP_PARTITION
+if [ -n "$SWAP_PARTITION" ] && [ ! -b "$SWAP_PARTITION" ]; then
+    echo "エラー: 指定されたパーティション $SWAP_PARTITION は存在しません。"
+    exit 1
+fi
 
 # システム設定
-HOSTNAME="myarch"           # ホスト名
-TIMEZONE="Asia/Tokyo"       # タイムゾーン
-LOCALE_LANG="ja_JP.UTF-8"   # ロケール
-KEYMAP="jp106"              # キーボードマップ
+HOSTNAME="myarch"
+TIMEZONE="Asia/Tokyo"
+LOCALE_LANG="ja_JP.UTF-8"
+KEYMAP="jp106"
 
 # インストールする追加パッケージ
 EXTRA_PACKAGES="xorg-server xorg-xinit xorg-apps xf86-input-libinput \
@@ -49,7 +73,7 @@ echo "インストール設定内容を確認してください："
 echo "ディスク: ${DISK}"
 echo "EFIパーティション: ${EFI_PARTITION}"
 echo "ルートパーティション: ${ROOT_PARTITION}"
-echo "スワップパーティション: ${SWAP_PARTITION}"
+echo "スワップパーティション: ${SWAP_PARTITION:-なし}"
 echo "ホスト名: ${HOSTNAME}"
 echo "タイムゾーン: ${TIMEZONE}"
 echo "ロケール: ${LOCALE_LANG}"
@@ -74,8 +98,10 @@ reflector --country Japan --age 12 --protocol https --sort rate --save /etc/pacm
 # パーティションのフォーマット
 mkfs.fat -F32 "${EFI_PARTITION}"
 mkfs.ext4 "${ROOT_PARTITION}"
-mkswap "${SWAP_PARTITION}"
-swapon "${SWAP_PARTITION}"
+if [ -n "$SWAP_PARTITION" ]; then
+    mkswap "${SWAP_PARTITION}"
+    swapon "${SWAP_PARTITION}"
+fi
 
 # マウント
 mount "${ROOT_PARTITION}" /mnt
