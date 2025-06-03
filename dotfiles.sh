@@ -13,7 +13,7 @@ KEYMAP="jp106" # Japanese keyboard layout
 EXTRA_PACKAGES="xorg-server xorg-xinit xorg-apps xf86-input-libinput \
 lxqt lxqt-config lxqt-policykit lxqt-session lxqt-admin \
 openbox pcmanfm-qt qterminal featherpad \
-ttf-dejavu ttf-liberation noto-fonts noto-fonts-cjk pipewire pipewire-pulse pavucontrol"
+ttf-dejavu ttf-liberation noto-fonts noto-fonts-cjk pipewire pipewire-pulse pavucontrol fcitx5 fcitx5-mozc steam"
 # noto-fonts-cjk is for Japanese font display
 # ==========================
 
