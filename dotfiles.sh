@@ -11,7 +11,7 @@ ROOT_PARTITION="${DISK}2"   # ルートパーティション
 SWAP_PARTITION="${DISK}3"   # スワップパーティション
 
 # システム設定
-HOSTNAME="myarch"           # ホスト名
+HOSTNAME="user"           # ホスト名
 TIMEZONE="Asia/Tokyo"       # タイムゾーン
 LOCALE_LANG="ja_JP.UTF-8"   # ロケール
 KEYMAP="jp106"              # キーボードマップ
