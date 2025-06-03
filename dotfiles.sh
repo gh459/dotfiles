@@ -13,7 +13,7 @@ KEYMAP="jp106" # 日本語キーボードレイアウト
 EXTRA_PACKAGES="xorg-server xorg-xinit xorg-apps xf86-input-libinput \
 lxqt lxqt-config lxqt-policykit lxqt-session lxqt-admin \
 openbox pcmanfm-qt qterminal featherpad \
-ttf-dejavu ttf-liberation noto-fonts noto-fonts-cjk pipewire pipewire-pulse pavucontrol fcitx5 fcitx5-mozc steam"
+ttf-dejavu ttf-liberation noto-fonts noto-fonts-cjk pipewire pipewire-pulse pavucontrol fcitx5 fcitx5-mozc-ut steam"
 #  noto-fonts-cjk は日本語フォントの表示用です。
 # ==========================
 
