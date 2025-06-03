@@ -1,75 +1,27 @@
 #!/bin/bash
+
 set -e
 
 # ==========================
 # Configuration Section
 # ==========================
-HOSTNAME="myarch"
-TIMEZONE="Asia/Tokyo"
-LOCALE_LANG="en_US.UTF-8"
-KEYMAP="us"
+DISK="/dev/sda" # Installation disk
+EFI_PARTITION="${DISK}1" # EFI system partition
+ROOT_PARTITION="${DISK}2" # Root partition
+SWAP_PARTITION="${DISK}3" # Swap partition
+
+HOSTNAME="myarch" # Hostname
+TIMEZONE="Asia/Tokyo" # Timezone
+LOCALE_LANG="ja_JP.UTF-8" # Locale
+KEYMAP="jp106" # Keyboard map
+
 EXTRA_PACKAGES="xorg-server xorg-xinit xorg-apps xf86-input-libinput \
 lxqt lxqt-arch-config lxqt-policykit lxqt-session lxqt-admin \
 openbox obconf sddm pcmanfm-qt qterminal featherpad \
 ttf-dejavu ttf-liberation noto-fonts pipewire pipewire-pulse pavucontrol"
 # ==========================
 
-# Select installation disk
-echo "Enter the installation disk (e.g., /dev/sda, /dev/nvme0n1):"
-read DISK
-if [ ! -b "$DISK" ]; then
-    echo "Error: The specified disk $DISK does not exist."
-    exit 1
-fi
-
-echo "Do you want to create a swap partition? (yes/no)"
-read MAKE_SWAP
-if [ "$MAKE_SWAP" = "yes" ]; then
-    SWAP_SIZE="2G"  # Change if needed
-else
-    SWAP_SIZE=""
-fi
-
-echo "-------------------------"
-echo "Disk: $DISK"
-if [ "$MAKE_SWAP" = "yes" ]; then
-    echo "Swap: Will be created ($SWAP_SIZE)"
-else
-    echo "Swap: Will NOT be created"
-fi
-echo "WARNING: All data on $DISK will be erased. Continue? (yes/no)"
-read confirmation
-if [ "$confirmation" != "yes" ]; then
-    echo "Aborted."
-    exit 1
-fi
-
-# ==========================
-# Automatic Partitioning
-# ==========================
-sgdisk --zap-all "$DISK"
-
-if [ "$MAKE_SWAP" = "yes" ]; then
-    sgdisk -n 1:0:+512M -t 1:ef00 -c 1:"EFI System Partition" \
-           -n 2:0:-${SWAP_SIZE} -t 2:8300 -c 2:"Linux root" \
-           -n 3:0:0 -t 3:8200 -c 3:"Linux swap" "$DISK"
-    EFI_PARTITION="${DISK}1"
-    ROOT_PARTITION="${DISK}2"
-    SWAP_PARTITION="${DISK}3"
-else
-    sgdisk -n 1:0:+512M -t 1:ef00 -c 1:"EFI System Partition" \
-           -n 2:0:0 -t 2:8300 -c 2:"Linux root" "$DISK"
-    EFI_PARTITION="${DISK}1"
-    ROOT_PARTITION="${DISK}2"
-    SWAP_PARTITION=""
-fi
-
-partprobe "$DISK"
-sleep 2  # Wait for device nodes
-
-# ==========================
-# Username and Password
-# ==========================
+# Username and password input
 echo -n "Enter the username to create: "
 read USERNAME
 while true; do
@@ -86,37 +38,55 @@ while true; do
     fi
 done
 
-# ==========================
-# Filesystem Creation
-# ==========================
-mkfs.fat -F32 "$EFI_PARTITION"
-mkfs.ext4 "$ROOT_PARTITION"
-if [ -n "$SWAP_PARTITION" ]; then
-    mkswap "$SWAP_PARTITION"
-    swapon "$SWAP_PARTITION"
+# Confirmation
+echo "-------------------------"
+echo "Please confirm the installation settings:"
+echo "Disk: ${DISK}"
+echo "EFI Partition: ${EFI_PARTITION}"
+echo "Root Partition: ${ROOT_PARTITION}"
+echo "Swap Partition: ${SWAP_PARTITION}"
+echo "Hostname: ${HOSTNAME}"
+echo "Timezone: ${TIMEZONE}"
+echo "Locale: ${LOCALE_LANG}"
+echo "Keymap: ${KEYMAP}"
+echo "Extra Packages: ${EXTRA_PACKAGES}"
+echo "Username: ${USERNAME}"
+echo "-------------------------"
+echo "All data on ${DISK} will be erased. Do you want to continue? (yes/no)"
+read confirmation
+if [ "$confirmation" != "yes" ]; then
+    echo "Aborted."
+    exit 1
 fi
 
-# ==========================
-# Mount
-# ==========================
-mount "$ROOT_PARTITION" /mnt
-mkdir -p /mnt/boot/efi
-mount "$EFI_PARTITION" /mnt/boot/efi
-
-# ==========================
-# Base System Installation
-# ==========================
+# System clock
 timedatectl set-ntp true
+
+# Mirrorlist optimization
 pacman -Sy reflector --noconfirm --needed
 reflector --country Japan --age 12 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
+
+# Partition formatting
+mkfs.fat -F32 "${EFI_PARTITION}"
+mkfs.ext4 "${ROOT_PARTITION}"
+mkswap "${SWAP_PARTITION}"
+swapon "${SWAP_PARTITION}"
+
+# Mount
+mount "${ROOT_PARTITION}" /mnt
+mkdir -p /mnt/boot/efi
+mount "${EFI_PARTITION}" /mnt/boot/efi
+
+# Base system installation
 pacstrap /mnt base base-devel linux linux-firmware grub efibootmgr networkmanager sudo git vim
+
+# fstab generation
 genfstab -U /mnt >> /mnt/etc/fstab
 
-# ==========================
 # Create chroot setup script
-# ==========================
 cat <<EOF > /mnt/root/chroot-setup.sh
 #!/bin/bash
+
 set -e
 
 USERNAME="${USERNAME}"
@@ -172,8 +142,10 @@ EOF
 
 chmod +x /mnt/root/chroot-setup.sh
 
+# Run chroot setup
 arch-chroot /mnt /root/chroot-setup.sh
 
+# Final step
 echo "Installation is complete. Unmount and reboot? (yes/no)"
 read reboot_confirmation
 if [ "$reboot_confirmation" == "yes" ]; then
