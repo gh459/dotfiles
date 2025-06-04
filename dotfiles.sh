@@ -7,6 +7,16 @@
 set -euo pipefail
 
 # ==========================
+#      !!! WARNING !!!
+# ==========================
+# このスクリプトはUEFIシステム専用です。
+# 実行前に、動作するインターネット接続があることを確認してください。
+# このスクリプトは選択されたディスク上のすべてのデータを消去します。
+# 自己責任で使用してください。実行前にスクリプトを注意深く確認してください。
+# Arch Linuxのライブ環境からこのスクリプトを実行することを強く推奨します。
+# ==========================
+
+# ==========================
 # グローバル設定変数
 # ==========================
 HOSTNAME_CONFIG="myarch"
@@ -15,13 +25,14 @@ LOCALE_LANG_CONFIG="ja_JP.UTF-8"
 KEYMAP_CONFIG="jp106"
 
 # インストールする追加パッケージ
+# 将来的に、これを外部ファイルから読み込むか、ユーザーに選択させることで柔軟性を高めることができます。
 EXTRA_PACKAGES_CONFIG="xorg-server xorg-xinit xorg-apps xf86-input-libinput \
 lxqt lxqt-config lxqt-policykit lxqt-session lxqt-admin \
 openbox pcmanfm-qt qterminal featherpad \
 ttf-dejavu ttf-liberation noto-fonts noto-fonts-cjk pipewire pipewire-pulse pavucontrol fcitx5 fcitx5-mozc-ut steam"
 
 # GPTパーティションラベル名
-EFI_PARTITION_NAME="ESP_ARCH" # 一意性を高めるため、少し変更
+EFI_PARTITION_NAME="ESP_ARCH"
 ROOT_PARTITION_NAME="ROOT_ARCH"
 SWAP_PARTITION_NAME="SWAP_ARCH"
 
@@ -30,7 +41,8 @@ DISK=""
 MAKE_SWAP=""
 SWAP_SIZE=""
 USERNAME=""
-PASSWORD=""
+# PASSWORD="" # chroot内で直接設定するため不要に
+REFLECTOR_COUNTRY_CODE="" # Reflectorで使用する国コード
 
 EFI_PARTITION_DEVICE=""
 ROOT_PARTITION_DEVICE=""
@@ -39,7 +51,6 @@ SWAP_PARTITION_DEVICE="" # スワップを作成する場合に設定
 # ==========================
 # ヘルパー関数
 # ==========================
-
 log_info() {
     echo -e "\033[32m[INFO]\033[0m $1"
 }
@@ -71,7 +82,6 @@ cleanup() {
         log_info "Turning off swap on $SWAP_PARTITION_DEVICE..."
         swapoff "$SWAP_PARTITION_DEVICE" || log_warn "Failed to turn off swap on $SWAP_PARTITION_DEVICE. Manual check may be needed."
     fi
-
     # マウントポイントをアンマウント (逆順で)
     if mountpoint -q /mnt/boot/efi; then
         log_info "Unmounting /mnt/boot/efi..."
@@ -85,12 +95,41 @@ cleanup() {
 }
 
 # ==========================
+# 必須コマンドチェック関数
+# ==========================
+check_required_commands() {
+    log_info "Checking for required commands..."
+    local missing_cmds=0
+    local commands_to_check=(
+        sgdisk mkfs.fat mkfs.ext4 mkswap swapon mount umount
+        pacstrap genfstab arch-chroot reflector timedatectl
+        partprobe udevadm lsblk fdisk
+    )
+    for cmd in "${commands_to_check[@]}"; do
+        if ! command -v "$cmd" &> /dev/null; then
+            log_error "Required command '$cmd' not found."
+            missing_cmds=$((missing_cmds + 1))
+        fi
+    done
+    if [ $missing_cmds -gt 0 ]; then
+        log_error "Please install missing commands or ensure you are in the Arch Linux live environment and try again."
+        exit 1
+    fi
+    log_info "All required commands are present."
+}
+
+# ==========================
 # インストール処理関数
 # ==========================
 
 # 初期設定値の入力と確認
 prompt_initial_settings() {
     log_info "Starting initial configuration..."
+
+    log_info "Available block devices:"
+    lsblk -f
+    echo "You can also use 'fdisk -l' for more details."
+
     echo "Enter the installation disk (e.g., /dev/sda, /dev/nvme0n1):"
     read -r DISK
     if [ ! -b "$DISK" ]; then
@@ -101,7 +140,9 @@ prompt_initial_settings() {
     echo "Do you want to create a swap partition? (yes/no)"
     read -r MAKE_SWAP
     if [ "$MAKE_SWAP" = "yes" ]; then
-        SWAP_SIZE="2G" # Default swap size, change if needed
+        echo "Enter swap size (e.g., 2G, 8G, if empty, default 4G will be used):"
+        read -r user_swap_size
+        SWAP_SIZE="${user_swap_size:-4G}" # デフォルトスワップサイズを4Gに変更
         log_info "Swap partition will be created with size: $SWAP_SIZE"
     else
         SWAP_SIZE=""
@@ -110,19 +151,16 @@ prompt_initial_settings() {
 
     echo -n "Enter the username for the new system: "
     read -r USERNAME
-    while true; do
-        echo -n "Enter password for user ${USERNAME}: "
-        read -s -r PASSWORD
-        echo
-        echo -n "Re-enter password for confirmation: "
-        read -s -r PASSWORD_CONFIRM
-        echo
-        if [ "$PASSWORD" == "$PASSWORD_CONFIRM" ]; then
-            break
-        else
-            log_warn "Passwords do not match. Please try again."
-        fi
-    done
+    if [ -z "$USERNAME" ]; then
+        log_error "Username cannot be empty."
+        exit 1
+    fi
+
+    echo "Enter the country code for reflector (e.g., JP, US, GB). Leave empty for 'Japan'."
+    read -r user_country_code
+    REFLECTOR_COUNTRY_CODE="${user_country_code:-Japan}"
+    log_info "Reflector will use country: $REFLECTOR_COUNTRY_CODE"
+
     log_info "Initial configuration complete."
 }
 
@@ -140,6 +178,7 @@ confirm_installation() {
     log_warn "Timezone: $TIMEZONE_CONFIG"
     log_warn "Locale: $LOCALE_LANG_CONFIG"
     log_warn "Keymap: $KEYMAP_CONFIG"
+    log_warn "Reflector Country: $REFLECTOR_COUNTRY_CODE"
     log_warn ""
     log_warn "WARNING: ALL DATA ON $DISK WILL BE ERASED. THIS ACTION CANNOT BE UNDONE."
     log_warn "--------------------------------------------------------------------"
@@ -176,6 +215,7 @@ partition_disk() {
 
     log_info "Informing the OS of partition table changes..."
     partprobe "$DISK"; check_command_status "Failed to run partprobe on $DISK."
+    udevadm settle; check_command_status "Failed to run udevadm settle."
 }
 
 # パーティションが認識されるまで待機
@@ -195,8 +235,10 @@ wait_for_partitions() {
         log_info "Still waiting for partitions... ($((count+1))/$retries)"
         sleep 2
         partprobe "$DISK" # partprobeを再試行
+        udevadm settle
         count=$((count+1))
     done
+
     log_error "Timeout waiting for partitions to be recognized. Please check manually using 'lsblk $DISK' or 'fdisk -l $DISK'."
     log_error "Expected EFI: $EFI_PARTITION_DEVICE, Root: $ROOT_PARTITION_DEVICE"
     if [ -n "$SWAP_PARTITION_DEVICE" ]; then
@@ -212,7 +254,7 @@ format_partitions() {
     mkfs.fat -F32 "$EFI_PARTITION_DEVICE"; check_command_status "Failed to format EFI partition $EFI_PARTITION_DEVICE."
 
     log_info "Formatting root partition ($ROOT_PARTITION_DEVICE) as ext4..."
-    mkfs.ext4 -F "$ROOT_PARTITION_DEVICE"; check_command_status "Failed to format root partition $ROOT_PARTITION_DEVICE." # Added -F to force
+    mkfs.ext4 -F "$ROOT_PARTITION_DEVICE"; check_command_status "Failed to format root partition $ROOT_PARTITION_DEVICE."
 
     if [ -n "$SWAP_PARTITION_DEVICE" ]; then
         log_info "Formatting swap partition ($SWAP_PARTITION_DEVICE)..."
@@ -240,7 +282,7 @@ install_base_system() {
 
     log_info "Optimizing pacman mirrorlist (this may take a moment)..."
     pacman -Sy reflector --noconfirm --needed; check_command_status "Failed to install reflector."
-    reflector --country Japan --age 12 --protocol https --sort rate --save /etc/pacman.d/mirrorlist; check_command_status "Failed to optimize mirrorlist with reflector."
+    reflector --country "$REFLECTOR_COUNTRY_CODE" --age 12 --protocol https --sort rate --save /etc/pacman.d/mirrorlist; check_command_status "Failed to optimize mirrorlist with reflector."
     log_info "Mirrorlist optimized."
 
     log_info "Installing base system packages (pacstrap)..."
@@ -273,12 +315,12 @@ check_cmd_chroot() {
 
 # Variables passed from the main script
 USERNAME_CHROOT="${USERNAME}"
-PASSWORD_CHROOT="${PASSWORD}"
+# PASSWORD_CHROOT is no longer passed. Password will be set interactively.
 HOSTNAME_CHROOT="${HOSTNAME_CONFIG}"
 TIMEZONE_CHROOT="${TIMEZONE_CONFIG}"
 LOCALE_LANG_CHROOT="${LOCALE_LANG_CONFIG}"
 KEYMAP_CHROOT="${KEYMAP_CONFIG}"
-EXTRA_PACKAGES_CHROOT="${EXTRA_PACKAGES_CONFIG}" # Ensure this is properly quoted if it contains spaces
+EXTRA_PACKAGES_CHROOT="${EXTRA_PACKAGES_CONFIG}"
 
 log_info_chroot "Synchronizing package databases..."
 pacman -Sy --noconfirm; check_cmd_chroot "Failed to synchronize package databases."
@@ -313,17 +355,17 @@ grub-mkconfig -o /boot/grub/grub.cfg; check_cmd_chroot "grub-mkconfig failed."
 
 log_info_chroot "Creating user \${USERNAME_CHROOT}..."
 useradd -m -G wheel -s /bin/bash "\${USERNAME_CHROOT}"; check_cmd_chroot "Failed to create user \${USERNAME_CHROOT}."
-log_info_chroot "Setting password for \${USERNAME_CHROOT}..."
-# WARNING: Storing password in a script and using chpasswd can be a security risk.
-# Consider prompting for password interactively if higher security is needed.
-echo "\${USERNAME_CHROOT}:\${PASSWORD_CHROOT}" | chpasswd; check_cmd_chroot "chpasswd failed for user \${USERNAME_CHROOT}."
+
+log_info_chroot "Setting password for user \${USERNAME_CHROOT}..."
+log_info_chroot "You will now be prompted to enter and confirm the password for user \${USERNAME_CHROOT}."
+passwd "\${USERNAME_CHROOT}"; check_cmd_chroot "Failed to set password for user \${USERNAME_CHROOT}."
 
 log_info_chroot "Configuring sudo for wheel group (using /etc/sudoers.d/)..."
 mkdir -p /etc/sudoers.d
 echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/01_wheel_sudo; check_cmd_chroot "Failed to configure sudoers.d for wheel group."
 chmod 0440 /etc/sudoers.d/01_wheel_sudo
 
-log_info_chroot "Installing additional packages: sddm and \${EXTRA_PACKAGES_CHROOT}..."
+log_info_chroot "Installing additional packages: sddm and others..."
 pacman -S --noconfirm --needed sddm \${EXTRA_PACKAGES_CHROOT}; check_cmd_chroot "Failed to install additional packages."
 
 log_info_chroot "Enabling essential services (sddm, NetworkManager)..."
@@ -332,23 +374,24 @@ systemctl enable NetworkManager; check_cmd_chroot "Failed to enable NetworkManag
 
 log_info_chroot "Setting up AUR helper (yay) and installing Google Chrome for user \${USERNAME_CHROOT}..."
 # WARNING: Installing packages from AUR involves community-maintained PKGBUILDs.
-# Always review PKGBUILDs before building and installing, especially when using --noconfirm.
+# Always review PKGBUILDs before building and installing.
 sudo -u "\${USERNAME_CHROOT}" bash -c '
-    set -euo pipefail # Add strict mode for user script
-    cd ~
-    log_info_chroot "User \${USERNAME_CHROOT}: Cloning yay repository..."
-    git clone https://aur.archlinux.org/yay.git || { log_error_chroot "User \${USERNAME_CHROOT}: Failed to clone yay."; exit 1; }
-    cd yay
-    log_info_chroot "User \${USERNAME_CHROOT}: Building and installing yay..."
-    makepkg -si --noconfirm || { log_error_chroot "User \${USERNAME_CHROOT}: Failed to build/install yay."; exit 1; }
-    cd ..
-    log_info_chroot "User \${USERNAME_CHROOT}: Removing yay build directory..."
-    rm -rf yay
-
-    log_info_chroot "User \${USERNAME_CHROOT}: Installing Google Chrome using yay..."
-    # The --noconfirm here skips PKGBUILD review and all yay confirmations. Use with caution.
-    yay -S --noconfirm google-chrome || { log_error_chroot "User \${USERNAME_CHROOT}: Failed to install google-chrome with yay."; exit 1; } # Added error check
-' || log_warn "AUR helper setup or Google Chrome installation encountered issues. Check logs." # Outer check for sudo -u command
+set -euo pipefail # Add strict mode for user script
+# Helper functions need to be accessible or re-defined if used within this sub-shell
+# For simplicity, direct echo is used here.
+echo "[CHROOT USER INFO] User \${USERNAME_CHROOT}: Changing to home directory..."
+cd ~
+echo "[CHROOT USER INFO] User \${USERNAME_CHROOT}: Cloning yay repository..."
+git clone https://aur.archlinux.org/yay.git || { echo "[CHROOT USER ERROR] User \${USERNAME_CHROOT}: Failed to clone yay." >&2; exit 1; }
+cd yay
+echo "[CHROOT USER INFO] User \${USERNAME_CHROOT}: Building and installing yay. Please review PKGBUILDs when prompted."
+makepkg -si || { echo "[CHROOT USER ERROR] User \${USERNAME_CHROOT}: Failed to build/install yay." >&2; exit 1; }
+cd ..
+echo "[CHROOT USER INFO] User \${USERNAME_CHROOT}: Removing yay build directory..."
+rm -rf yay
+echo "[CHROOT USER INFO] User \${USERNAME_CHROOT}: Installing Google Chrome using yay. Please review PKGBUILDs and confirm when prompted."
+yay -S google-chrome || { echo "[CHROOT USER ERROR] User \${USERNAME_CHROOT}: Failed to install google-chrome with yay." >&2; exit 1; }
+' || log_warn "AUR helper setup or Google Chrome installation encountered issues. Check logs."
 
 log_info_chroot "Chroot setup complete."
 CHROOT_SCRIPT_EOF
@@ -360,7 +403,6 @@ CHROOT_SCRIPT_EOF
 run_chroot_script() {
     log_info "Entering chroot and running setup script..."
     arch-chroot /mnt /root/chroot-setup.sh; check_command_status "Chroot setup script execution failed."
-    # chrootスクリプト内でエラーが発生した場合、check_command_statusがそれを検知する
     log_info "Chroot setup script finished."
 }
 
@@ -376,45 +418,4 @@ finish_installation() {
     echo "You can now unmount the partitions and reboot the system."
     echo "Do you want to unmount and reboot now? (yes/no)"
     read -r reboot_confirmation
-    if [ "$reboot_confirmation" == "yes" ]; then
-        log_info "Unmounting filesystems..."
-        # cleanup関数でアンマウントは行われるが、ここでは明示的に行う
-        # ただし、trapで呼ばれるcleanupと競合しないように注意する
-        # trapを一時的に無効化するか、cleanupを直接呼び出す
-        trap - EXIT ERR INT TERM # trapを解除
-        cleanup # 手動でクリーンアップを実行
-        log_info "Rebooting system..."
-        reboot
-    else
-        log_info "Please run 'umount -R /mnt && reboot' or simply 'reboot' (after exiting script) manually to restart into your new Arch Linux system."
-        log_info "Ensure all /mnt/* partitions are unmounted before rebooting if you do it manually."
-    fi
-}
-
-# ==========================
-# メイン処理
-# ==========================
-main() {
-    # スクリプト終了時に cleanup 関数を呼び出すように trap を設定
-    trap cleanup EXIT ERR INT TERM
-
-    prompt_initial_settings
-    confirm_installation
-    partition_disk
-    wait_for_partitions # DISK変数はグローバルなので渡す必要なし
-    format_partitions
-    mount_filesystems
-    install_base_system
-    generate_chroot_script
-    run_chroot_script
-    finish_installation
-
-    # 正常終了時はtrapを解除してexit
-    trap - EXIT
-    log_info "Arch Linux installation script completed successfully!"
-    exit 0
-}
-
-# スクリプト実行開始
-main
-
+    if [ "$reboot_
