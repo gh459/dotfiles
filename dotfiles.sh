@@ -453,6 +453,36 @@ if [ -n "\${PACKAGES_TO_INSTALL_CHROOT}" ]; then
 else
     log_info_chroot "No extra DE/DM/Terminal/Utility packages selected to install."
 fi
+#!/bin/bash
+
+# YAYインストール確認とインストール処理の追加
+install_yay_prompt() {
+  echo "Do you want to install yay (AUR helper)? (yes/no)"
+  read -r install_yay_choice
+  if [ "$install_yay_choice" = "yes" ]; then
+    echo "Installing yay..."
+    # 必要なパッケージのインストール
+    sudo pacman -S --needed base-devel git
+    # yayのクローンとビルド
+    git clone https://aur.archlinux.org/yay.git
+    cd yay
+    makepkg -si
+    cd ..
+    # クローンしたディレクトリの削除
+    rm -rf yay
+    echo "yay installation completed."
+  else
+    echo "Skipping yay installation."
+  fi
+}
+
+# メイン処理のどこかで呼び出す
+install_yay_prompt
+
+sudo pacman -S --needed base-devel git
+git clone https://aur.archlinux.org/yay.git
+cd yay
+makepkg -si
 
 log_info_chroot "Enabling essential services (NetworkManager)..."
 systemctl enable NetworkManager; check_cmd_chroot "Failed to enable NetworkManager service."
