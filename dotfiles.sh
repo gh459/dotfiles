@@ -1,241 +1,283 @@
 #!/bin/bash
+set -euo pipefail # エラー発生時にスクリプトを停止
 
+# --- 初期設定 ---
+echo "キーボードレイアウトを日本語に設定します。"
+loadkeys jp106
+
+echo "ネットワーク時刻同期を有効にします。"
+timedatectl set-ntp true
+
+# --- ディスク設定 ---
+echo "利用可能なディスク:"
+lsblk -dno NAME,SIZE,MODEL # ディスク一覧を表示[4][15]
+
+read -p "インストール先ディスクを選択してください (例: sda, nvme0n1): " INSTALL_DRIVE
+TARGET_DEV="/dev/${INSTALL_DRIVE}"
+
+read -p "このディスク (${TARGET_DEV}) のデータを全て消去し、パーティションを作成します。よろしいですか？ (yes/no): " CONFIRM_PARTITION
+if [ "$CONFIRM_PARTITION" != "yes" ]; then
+    echo "中止します。"
+    exit 1
+fi
+
+read -p "スワップパーティションを作成しますか？ (yes/no): " CREATE_SWAP
+SWAP_SIZE=""
+if [ "$CREATE_SWAP" == "yes" ]; then
+    read -p "スワップサイズを入力してください (例: 8G, RAMと同容量を推奨): " SWAP_SIZE
+fi
+
+echo "パーティションを作成しています..."
+# UEFIシステムを想定
+# 既存のパーティション情報を消去
+sgdisk --zap-all "${TARGET_DEV}" # ディスクの全パーティション情報を消去[13]
+
+# GPTパーティションテーブルを作成
+sgdisk -o "${TARGET_DEV}" # GPTラベルを作成[5]
+
+# EFIシステムパーティション (ESP) を作成
+sgdisk -n 1:0:+512M -t 1:ef00 -c 1:"EFI System Partition" "${TARGET_DEV}"
+
+# パーティション番号の管理
+PART_NUM=2
+ROOT_PART_DEV=""
+SWAP_PART_DEV=""
+
+if [ "$CREATE_SWAP" == "yes" ]; then
+    # スワップパーティションを作成
+    sgdisk -n ${PART_NUM}:0:+${SWAP_SIZE} -t ${PART_NUM}:8200 -c ${PART_NUM}:"Linux swap" "${TARGET_DEV}"
+    SWAP_PART_DEV="${TARGET_DEV}${PART_NUM}"
+    PART_NUM=$((PART_NUM + 1))
+fi
+
+# ルートパーティションを作成 (残りの全領域)
+sgdisk -n ${PART_NUM}:0:0 -t ${PART_NUM}:8300 -c ${PART_NUM}:"Linux root" "${TARGET_DEV}"
+ROOT_PART_DEV="${TARGET_DEV}${PART_NUM}"
+EFI_PART_DEV="${TARGET_DEV}1" # EFIパーティションは常に1番
+
+# パーティション変更をカーネルに認識させる
+partprobe "${TARGET_DEV}"
+sleep 2 # 念のため待機
+
+echo "ファイルシステムを作成しています..."
+mkfs.fat -F32 "${EFI_PART_DEV}" # EFIパーティションをFAT32でフォーマット[13]
+
+if [ "$CREATE_SWAP" == "yes" ]; then
+    mkswap "${SWAP_PART_DEV}" # スワップパーティションをフォーマット[13]
+fi
+
+mkfs.ext4 -F "${ROOT_PART_DEV}" # ルートパーティションをext4でフォーマット[13]
+
+echo "パーティションをマウントしています..."
+mount "${ROOT_PART_DEV}" /mnt
+mkdir -p /mnt/boot
+mount "${EFI_PART_DEV}" /mnt/boot
+
+if [ "$CREATE_SWAP" == "yes" ]; then
+    swapon "${SWAP_PART_DEV}" # スワップを有効化
+fi
+
+# --- ベースシステムのインストール ---
+echo "ベースシステムと必須パッケージをインストールしています..."
+# 必要なパッケージ: 基本システム、カーネル、ファームウェア、開発ツール、git、sudo、テキストエディタ、ネットワーク管理、ブートローダー
+pacstrap /mnt base linux linux-firmware base-devel git sudo nano networkmanager grub efibootmgr dhcpcd
+
+# --- fstabの生成 ---
+echo "fstabを生成しています..."
+genfstab -U /mnt >> /mnt/etc/fstab # fstabを生成[13]
+
+# --- chrootスクリプトのための情報収集 ---
+echo "システム設定情報を入力してください。"
+read -p "作成するユーザー名: " USER_NAME
+read -sp "作成するユーザーのパスワード: " USER_PASSWORD
+echo
+read -sp "rootユーザーのパスワード: " ROOT_PASSWORD
+echo
+read -p "ホスト名: " HOST_NAME
+read -p "自動ログインを有効にしますか？ (yes/no): " AUTO_LOGIN
+
+echo "デスクトップ環境を選択してください:"
+DE_OPTIONS=("GNOME" "KDE Plasma" "XFCE" "LXQt" "Cinnamon" "なし")
+select SELECTED_DE in "${DE_OPTIONS[@]}"; do
+    if [[ " ${DE_OPTIONS[*]} " =~ " ${SELECTED_DE} " ]]; then
+        break
+    else
+        echo "無効な選択です。"
+    fi
+done
+
+SELECTED_DM=""
+DM_SERVICE_NAME=""
+if [ "$SELECTED_DE" != "なし" ]; then
+    echo "ディスプレイマネージャーを選択してください:"
+    DM_OPTIONS=("GDM (GNOME推奨)" "SDDM (KDE Plasma推奨)" "LightDM (軽量)" "LXDM (LXQt/LXDE推奨)" "なし (手動でstartx)")
+    select SELECTED_DM_RAW in "${DM_OPTIONS[@]}"; do
+        if [[ " ${DM_OPTIONS[*]} " =~ " ${SELECTED_DM_RAW} " ]]; then
+            case "$SELECTED_DM_RAW" in
+                "GDM (GNOME推奨)") SELECTED_DM="gdm"; DM_SERVICE_NAME="gdm.service";;
+                "SDDM (KDE Plasma推奨)") SELECTED_DM="sddm"; DM_SERVICE_NAME="sddm.service";;
+                "LightDM (軽量)") SELECTED_DM="lightdm lightdm-gtk-greeter"; DM_SERVICE_NAME="lightdm.service";; # lightdm-gtk-greeterもインストール
+                "LXDM (LXQt/LXDE推奨)") SELECTED_DM="lxdm"; DM_SERVICE_NAME="lxdm.service";;
+                "なし (手動でstartx)") SELECTED_DM=""; DM_SERVICE_NAME="";;
+            esac
+            break
+        else
+            echo "無効な選択です。"
+        fi
+    done
+fi
+
+
+echo "ターミナルエミュレータを選択してください:"
+TERM_OPTIONS=("gnome-terminal (GNOME)" "konsole (KDE)" "xfce4-terminal (XFCE)" "lxterminal (LXDE/LXQt)" "alacritty (軽量/GPU)" "なし")
+select SELECTED_TERM in "${TERM_OPTIONS[@]}"; do
+    if [[ " ${TERM_OPTIONS[*]} " =~ " ${SELECTED_TERM} " ]]; then
+        break
+    else
+        echo "無効な選択です。"
+    fi
+done
+
+read -p "Steamをインストールしますか？ (yes/no): " INSTALL_STEAM
+read -p "ProtonUp-QTをインストールしますか？ (yes/no): " INSTALL_PROTONUPQT
+
+
+# --- chrootスクリプトの作成と実行 ---
+echo "chrootスクリプトを生成しています..."
+cat <<CHROOT_SCRIPT > /mnt/arch-chroot-script.sh
+#!/bin/bash
 set -euo pipefail
 
-# --- Helper Functions for chroot ---
+echo "タイムゾーンを設定 (Asia/Tokyo)"
+ln -sf /usr/share/zoneinfo/Asia/Tokyo /etc/localtime
+hwclock --systohc
 
-log_info_chroot() {
-    echo -e "\033[32m[CHROOT INFO]\033[0m $1"
-}
+echo "ロケールを設定 (ja_JP.UTF-8, en_US.UTF-8)"
+echo "ja_JP.UTF-8 UTF-8" >> /etc/locale.gen
+echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
+locale-gen
+echo "LANG=ja_JP.UTF-8" > /etc/locale.conf
+echo "KEYMAP=jp106" > /etc/vconsole.conf # コンソールキーマップ
 
-log_error_chroot() {
-    echo -e "\033[31m[CHROOT ERROR]\033[0m $1" >&2
-}
-
-check_cmd_chroot() {
-    local status=$?
-    local message=$1
-    if [ $status -ne 0 ]; then
-        log_error_chroot "Command failed: $message (Exit code: $status)"
-        exit $status
-    fi
-}
-
-# --- End Helper Functions ---
-
-# Variables passed from the main script (with default values)
-USERNAME_CHROOT=${username_chroot_esc:-archuser}
-HOSTNAME_CHROOT=${hostname_chroot_esc:-archlinux}
-TIMEZONE_CHROOT=${timezone_chroot_esc:-UTC}
-LOCALE_LANG_CHROOT=${locale_lang_chroot_esc:-en_US.UTF-8}
-KEYMAP_CHROOT=${keymap_chroot_esc:-us}
-PACKAGES_TO_INSTALL_CHROOT=${packages_to_install_chroot_esc:-""}
-DM_SERVICE_CHROOT=${dm_service_chroot_esc:-""}
-AUTOLOGIN_USER_CHROOT=${autologin_user_chroot_esc:-""}
-DE_CHROOT=${de_chroot_esc:-""}
-INSTALL_YAY_CHROOT=${install_yay_chroot_esc:-no}
-PREFERRED_SHELL_CHROOT=${preferred_shell_chroot_esc:-bash}
-INSTALL_OHMYZSH_CHROOT=${install_ohmyzsh_chroot_esc:-no}
-INSTALL_STEAM_CHROOT=${install_steam_chroot_esc:-no}
-INSTALL_PROTONUPQT_CHROOT=${install_protonupqt_chroot_esc:-no}
-INSTALL_CHROME_CHROOT=${install_chrome_chroot_esc:-no}
-ENABLE_FIREWALLD_CHROOT=${enable_firewalld_chroot_esc:-no}
-ENABLE_BLUETOOTH_CHROOT=${enable_bluetooth_chroot_esc:-no}
-ENABLE_CUPS_CHROOT=${enable_cups_chroot_esc:-no}
-
-log_info_chroot "Starting chroot setup script..."
-
-log_info_chroot "Synchronizing package databases..."
-pacman -Syy --noconfirm; check_cmd_chroot "Failed to synchronize package databases."
-
-log_info_chroot "Installing essential development tools: base-devel and git..."
-pacman -S --noconfirm --needed base-devel git; check_cmd_chroot "Failed to install base-devel and git."
-
-log_info_chroot "Configuring timezone to ${TIMEZONE_CHROOT}..."
-ln -sf "/usr/share/zoneinfo/${TIMEZONE_CHROOT}" /etc/localtime; check_cmd_chroot "Failed to set timezone."
-hwclock --systohc; check_cmd_chroot "Failed to set hardware clock."
-
-log_info_chroot "Configuring locale (${LOCALE_LANG_CHROOT})..."
-sed -i "s/^#\(${LOCALE_LANG_CHROOT}.*UTF-8\)/\1/" /etc/locale.gen; check_cmd_chroot "Failed to uncomment locale: ${LOCALE_LANG_CHROOT}"
-if [[ "${LOCALE_LANG_CHROOT}" != "en_US.UTF-8" ]]; then
-    sed -i "s/^#\(en_US.UTF-8 UTF-8\)/\1/" /etc/locale.gen; check_cmd_chroot "Failed to uncomment locale: en_US.UTF-8"
-fi
-locale-gen; check_cmd_chroot "locale-gen failed."
-echo "LANG=${LOCALE_LANG_CHROOT}" > /etc/locale.conf
-echo "KEYMAP=${KEYMAP_CHROOT}" > /etc/vconsole.conf
-
-log_info_chroot "Configuring hostname to ${HOSTNAME_CHROOT}..."
-echo "${HOSTNAME_CHROOT}" > /etc/hostname
-cat << HOSTS_EOF_INNER > /etc/hosts
+echo "ホスト名を設定: ${HOST_NAME}"
+echo "${HOST_NAME}" > /etc/hostname
+cat <<HOSTS > /etc/hosts
 127.0.0.1 localhost
-::1 localhost
-127.0.1.1 ${HOSTNAME_CHROOT}.localdomain ${HOSTNAME_CHROOT}
-HOSTS_EOF_INNER
-check_cmd_chroot "Failed to configure /etc/hosts."
+::1       localhost
+127.0.1.1 ${HOST_NAME}.localdomain ${HOST_NAME}
+HOSTS
 
-log_info_chroot "Generating initramfs (mkinitcpio)..."
-mkinitcpio -P; check_cmd_chroot "mkinitcpio -P failed."
+echo "rootパスワードを設定します..."
+echo "root:${ROOT_PASSWORD}" | chpasswd
 
-log_info_chroot "Installing GRUB bootloader..."
-grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck; check_cmd_chroot "grub-install failed."
+echo "ユーザー '${USER_NAME}' を作成し、パスワードを設定します..."
+useradd -m -G wheel -s /bin/bash "${USER_NAME}" # wheelグループに追加[6][17]
+echo "${USER_NAME}:${USER_PASSWORD}" | chpasswd
+echo "ユーザー '${USER_NAME}' のsudo権限を有効化します (wheelグループのコメント解除)"
+sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers # wheelグループのsudo権限を有効化
 
-log_info_chroot "Generating GRUB configuration..."
-grub-mkconfig -o /boot/grub/grub.cfg; check_cmd_chroot "grub-mkconfig failed."
-
-log_info_chroot "Creating user ${USERNAME_CHROOT}..."
-useradd -m -G wheel -s /bin/bash "${USERNAME_CHROOT}"; check_cmd_chroot "Failed to create user ${USERNAME_CHROOT}."
-
-log_info_chroot "Setting password for user ${USERNAME_CHROOT}..."
-echo "Please enter the password for user ${USERNAME_CHROOT} in the chroot environment:"
-passwd "${USERNAME_CHROOT}" # 対話的なため、check_cmd_chrootは使用しない
-
-log_info_chroot "Configuring sudo for wheel group (using /etc/sudoers.d/)..."
-mkdir -p /etc/sudoers.d
-echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/01_wheel_sudo; check_cmd_chroot "Failed to configure sudoers.d for wheel group."
-chmod 0440 /etc/sudoers.d/01_wheel_sudo
-
-log_info_chroot "Installing DE, DM, Terminal, and additional packages..."
-if [ -n "${PACKAGES_TO_INSTALL_CHROOT}" ]; then
-    pacman -S --noconfirm --needed ${PACKAGES_TO_INSTALL_CHROOT}; check_cmd_chroot "Failed to install selected packages."
-else
-    log_info_chroot "No extra DE/DM/Terminal/Utility packages selected to install."
+if [ "${AUTO_LOGIN}" == "yes" ]; then
+    echo "コンソールへの自動ログインを設定します..."
+    mkdir -p /etc/systemd/system/getty@tty1.service.d
+    cat <<AUTOLOGIN_CONF > /etc/systemd/system/getty@tty1.service.d/override.conf
+[Service]
+ExecStart=
+ExecStart=-/usr/bin/agetty --autologin ${USER_NAME} --noclear %I \$TERM
+AUTOLOGIN_CONF
+    systemctl enable getty@tty1.service # 自動ログインサービス有効化[7][18]
+    echo "コンソールへの自動ログインが設定されました。ディスプレイマネージャーの自動ログインは別途設定が必要な場合があります。"
 fi
 
-log_info_chroot "Enabling essential services (NetworkManager)..."
-systemctl enable NetworkManager; check_cmd_chroot "Failed to enable NetworkManager service."
+echo "ネットワークマネージャーを有効化します..."
+systemctl enable NetworkManager
+systemctl enable dhcpcd # 有線LANのDHCPクライアント
 
-if [ -n "${DM_SERVICE_CHROOT}" ] && [ "${DM_SERVICE_CHROOT}" != "none" ]; then
-    log_info_chroot "Enabling display manager service: ${DM_SERVICE_CHROOT}..."
-    systemctl enable "${DM_SERVICE_CHROOT}"; check_cmd_chroot "Failed to enable ${DM_SERVICE_CHROOT} service."
+echo "ブートローダー (GRUB) をインストールし設定します..."
+grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=ARCH --recheck # GRUBインストール[13]
+grub-mkconfig -o /boot/grub/grub.cfg # GRUB設定ファイル生成[13]
 
-    if [[ "${DM_SERVICE_CHROOT}" == "sddm.service" ]] && [ -n "${AUTOLOGIN_USER_CHROOT}" ] && [ "${AUTOLOGIN_USER_CHROOT}" == "${USERNAME_CHROOT}" ]; then
-        log_info_chroot "Configuring autologin for user ${AUTOLOGIN_USER_CHROOT} with SDDM..."
-        mkdir -p /etc/sddm.conf.d
-        sddm_session_file="" # `local` was removed here
-        case "${DE_CHROOT}" in
-            "lxqt") sddm_session_file="lxqt.desktop";;
-            "gnome") sddm_session_file="gnome.desktop";;
-            "kde") sddm_session_file="plasma.desktop";;
-            "xfce") sddm_session_file="xfce.desktop";;
-            *) log_info_chroot "Warning: Could not determine SDDM session for DE '${DE_CHROOT}'. Autologin might require manual session setting.";;
-        esac
-        if [ -n "$sddm_session_file" ]; then
-            echo -e "[Autologin]\nUser=${AUTOLOGIN_USER_CHROOT}\nSession=${sddm_session_file}" > /etc/sddm.conf.d/autologin.conf
-            check_cmd_chroot "Failed to write SDDM autologin configuration."
-            log_info_chroot "SDDM autologin configured for session: ${sddm_session_file}"
-        else
-            echo -e "[Autologin]\nUser=${AUTOLOGIN_USER_CHROOT}" > /etc/sddm.conf.d/autologin.conf
-            log_info_chroot "SDDM autologin configured for user ${AUTOLOGIN_USER_CHROOT}, session may need to be chosen on first login or set manually."
-        fi
-    elif [ -n "${AUTOLOGIN_USER_CHROOT}" ] && [ "${AUTOLOGIN_USER_CHROOT}" != "${USERNAME_CHROOT}" ]; then
-        log_info_chroot "Warning: AUTOLOGIN_USER_CHROOT (${AUTOLOGIN_USER_CHROOT}) does not match current user (${USERNAME_CHROOT}). SDDM Autologin not configured for this discrepancy."
-    fi
-else
-    log_info_chroot "No display manager service selected to enable."
+# --- デスクトップ環境、ディスプレイマネージャー、ターミナルのインストール ---
+DE_PACKAGE=""
+case "${SELECTED_DE}" in
+    "GNOME") DE_PACKAGE="gnome";; # gnome-extra はお好みで
+    "KDE Plasma") DE_PACKAGE="plasma kde-applications";;
+    "XFCE") DE_PACKAGE="xfce4 xfce4-goodies";;
+    "LXQt") DE_PACKAGE="lxqt breeze-icons oxygen-icons";; # アイコンテーマも追加
+    "Cinnamon") DE_PACKAGE="cinnamon";;
+    "なし") ;;
+esac
+
+DM_PACKAGE="${SELECTED_DM}" # SELECTED_DMはパッケージ名(群)になっている
+TERM_PACKAGE_NAME=""
+case "${SELECTED_TERM}" in
+    "gnome-terminal (GNOME)") TERM_PACKAGE_NAME="gnome-terminal";;
+    "konsole (KDE)") TERM_PACKAGE_NAME="konsole";;
+    "xfce4-terminal (XFCE)") TERM_PACKAGE_NAME="xfce4-terminal";;
+    "lxterminal (LXDE/LXQt)") TERM_PACKAGE_NAME="lxterminal";;
+    "alacritty (軽量/GPU)") TERM_PACKAGE_NAME="alacritty";;
+    "なし") ;;
+esac
+
+INSTALL_PACKAGES=""
+if [ -n "\$DE_PACKAGE" ]; then INSTALL_PACKAGES="\$DE_PACKAGE"; fi
+if [ -n "\$DM_PACKAGE" ]; then INSTALL_PACKAGES="\$INSTALL_PACKAGES \$DM_PACKAGE"; fi
+if [ -n "\$TERM_PACKAGE_NAME" ]; then INSTALL_PACKAGES="\$INSTALL_PACKAGES \$TERM_PACKAGE_NAME"; fi
+
+if [ -n "\$INSTALL_PACKAGES" ]; then
+    echo "選択されたデスクトップ関連パッケージをインストールします: \$INSTALL_PACKAGES"
+    pacman -S --noconfirm --needed \$INSTALL_PACKAGES
 fi
 
-# Preferred shell setup
-if [ -n "${PREFERRED_SHELL_CHROOT}" ] && [ "/bin/${PREFERRED_SHELL_CHROOT}" != "/bin/bash" ]; then
-    log_info_chroot "Installing preferred shell: ${PREFERRED_SHELL_CHROOT}..."
-    pacman -S --noconfirm --needed "${PREFERRED_SHELL_CHROOT}"; check_cmd_chroot "Failed to install ${PREFERRED_SHELL_CHROOT}."
-
-    log_info_chroot "Changing default shell for user ${USERNAME_CHROOT} to /usr/bin/${PREFERRED_SHELL_CHROOT}..."
-    chsh -s "/usr/bin/${PREFERRED_SHELL_CHROOT}" "${USERNAME_CHROOT}"; check_cmd_chroot "Failed to change shell to ${PREFERRED_SHELL_CHROOT} for user ${USERNAME_CHROOT}."
+if [ -n "${DM_SERVICE_NAME}" ]; then
+    echo "ディスプレイマネージャーサービス (${DM_SERVICE_NAME}) を有効化します..."
+    systemctl enable "${DM_SERVICE_NAME}" # ディスプレイマネージャーサービス有効化[8]
 fi
 
-# Oh My Zsh installation (if zsh is the preferred shell)
-if [ "${PREFERRED_SHELL_CHROOT}" == "zsh" ] && [ "${INSTALL_OHMYZSH_CHROOT}" == "yes" ]; then
-    log_info_chroot "Installing Oh My Zsh for user ${USERNAME_CHROOT}..."
-    sudo -u "${USERNAME_CHROOT}" bash -c '
-        set -e
-        if [ ! -d "$HOME/.oh-my-zsh" ]; then
-            echo "Cloning Oh My Zsh..."
-            git clone --depth=1 https://github.com/ohmyzsh/ohmyzsh.git "$HOME/.oh-my-zsh" >/dev/null 2>&1
-            echo "Copying .zshrc template..."
-            cp "$HOME/.oh-my-zsh/templates/zshrc.zsh-template" "$HOME/.zshrc"
-            echo "Oh My Zsh installed."
-        else
-            echo "Oh My Zsh is already installed."
-        fi
-    '; check_cmd_chroot "Failed to install Oh My Zsh for user ${USERNAME_CHROOT}."
+# --- 追加ソフトウェアのインストール ---
+echo "AURヘルパー (yay) をインストールします..."
+# yayのビルドにはgoが必要
+pacman -S --noconfirm --needed go
+cd /tmp
+sudo -u "${USER_NAME}" bash -c 'git clone https://aur.archlinux.org/yay.git && cd yay && makepkg -si --noconfirm && cd .. && rm -rf yay' # yayのインストール[9][19]
+
+echo "Google Chrome をインストールします..."
+sudo -u "${USER_NAME}" yay -S --noconfirm google-chrome # Chromeインストール[9][19]
+
+if [ "${INSTALL_STEAM}" == "yes" ]; then
+    echo "Steam をインストールします..."
+    # multilibリポジトリを有効化
+    sed -i "/\\[multilib\\]/,/Include/"'s/^#//' /etc/pacman.conf # multilib有効化[10][20]
+    pacman -Sy --noconfirm # パッケージデータベース同期
+    pacman -S --noconfirm steam # Steamインストール[10][20]
 fi
 
-# Enable additional services
-if [ "${ENABLE_FIREWALLD_CHROOT}" == "yes" ]; then
-    log_info_chroot "Enabling firewalld service..."
-    systemctl enable firewalld; check_cmd_chroot "Failed to enable firewalld service."
+if [ "${INSTALL_PROTONUPQT}" == "yes" ]; then
+    echo "ProtonUp-QT をインストールします (Flatpak経由)..."
+    pacman -S --noconfirm flatpak # Flatpakインストール
+    # Flatpakリポジトリ(flathub)のセットアップはユーザーが行うか、ここで追加するか検討
+    # sudo -u "${USER_NAME}" flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+    # 上記はGUI環境やユーザーセッションがないと失敗する可能性があるため、ここではインストールのみ
+    sudo -u "${USER_NAME}" flatpak install -y --noninteractive flathub com.davidotek.protonup-qt # ProtonUp-QTインストール[11]
+    echo "ProtonUp-QTがFlatpak経由でインストールされました。初回起動時にFlathubリポジトリのセットアップが必要な場合があります。"
 fi
 
-if [ "${ENABLE_BLUETOOTH_CHROOT}" == "yes" ]; then
-    log_info_chroot "Enabling bluetooth service..."
-    pacman -S --noconfirm --needed bluez bluez-utils
-    systemctl enable bluetooth; check_cmd_chroot "Failed to enable bluetooth service."
-fi
+echo "chrootスクリプトの処理が完了しました。"
+echo "システムを再起動する準備ができました。"
+echo "chroot環境から抜けるには 'exit' と入力し、その後ホストシステムで 'umount -R /mnt' を実行し、'reboot' してください。"
 
-if [ "${ENABLE_CUPS_CHROOT}" == "yes" ]; then
-    log_info_chroot "Enabling cups service..."
-    pacman -S --noconfirm --needed cups
-    systemctl enable cups.service; check_cmd_chroot "Failed to enable cups service."
-fi
+CHROOT_SCRIPT
 
-# yay installation
-if [ "${INSTALL_YAY_CHROOT}" = "yes" ]; then
-    log_info_chroot "Attempting to install AUR helper (yay) for user ${USERNAME_CHROOT}..."
-    sudo -u "${USERNAME_CHROOT}" bash -ec '
-        echo "[YAY_INSTALL INFO] Starting yay installation as user: $(whoami)"
-        build_dir_name="yay_build_temp_$(date +%s)"
-        build_dir="$HOME/${build_dir_name}"
+chmod +x /mnt/arch-chroot-script.sh
 
-        mkdir -p "${build_dir}"
-        cd "${build_dir}" || { echo "[YAY_INSTALL ERROR] Failed to cd to ${build_dir}."; exit 1; }
+echo "chroot環境に入り、設定スクリプトを実行します..."
+arch-chroot /mnt /arch-chroot-script.sh
 
-        echo "[YAY_INSTALL INFO] Cloning yay from AUR (https://aur.archlinux.org/yay.git) into ${build_dir}..."
-        git clone --depth=1 https://aur.archlinux.org/yay.git || { echo "[YAY_INSTALL ERROR] Failed to clone yay repository."; exit 1; }
+# --- 後処理 ---
+echo "インストール処理が完了しました。"
+echo "アンマウントと再起動を行ってください。"
+echo "1. exit (もしchroot環境内にまだいる場合)"
+echo "2. umount -R /mnt"
+echo "3. reboot"
 
-        cd yay || { echo "[YAY_INSTALL ERROR] Failed to cd into yay directory."; exit 1; }
-
-        echo "[YAY_INSTALL INFO] Building and installing yay (makepkg -si --noconfirm --needed)..."
-        makepkg -si --noconfirm --needed || { echo "[YAY_INSTALL ERROR] makepkg -si for yay failed."; exit 1; }
-
-        echo "[YAY_INSTALL INFO] yay installed successfully."
-
-        cd "$HOME" || echo "[YAY_INSTALL WARN] Could not cd to home for cleanup, build dir ${build_dir} may remain."
-        rm -rf "${build_dir}"
-        echo "[YAY_INSTALL INFO] Cleaned up yay build directory: ${build_dir}."
-    '; check_cmd_chroot "yay installation process for user ${USERNAME_CHROOT} failed."
-
-    # ProtonUp-Qt and Google Chrome installation via yay
-    if [ "${INSTALL_PROTONUPQT_CHROOT}" = "yes" ]; then
-        log_info_chroot "Installing ProtonUp-Qt for user ${USERNAME_CHROOT} via yay..."
-        sudo -u "${USERNAME_CHROOT}" yay -S --noconfirm --needed protonup-qt
-        check_cmd_chroot "Failed to install ProtonUp-Qt via yay."
-        log_info_chroot "ProtonUp-Qt installed."
-    fi
-
-    if [ "${INSTALL_CHROME_CHROOT}" = "yes" ]; then
-        log_info_chroot "Installing Google Chrome for user ${USERNAME_CHROOT} via yay..."
-        sudo -u "${USERNAME_CHROOT}" yay -S --noconfirm --needed google-chrome
-        check_cmd_chroot "Failed to install Google Chrome via yay."
-        log_info_chroot "Google Chrome installed."
-    fi
-else
-    log_info_chroot "Skipping yay installation as per user choice."
-    if [ "${INSTALL_PROTONUPQT_CHROOT}" = "yes" ] || [ "${INSTALL_CHROME_CHROOT}" = "yes" ]; then
-        log_info_chroot "Skipping ProtonUp-Qt/Google Chrome installation as yay was not selected to be installed."
-    fi
-fi
-
-# Steam installation (via pacman)
-if [ "${INSTALL_STEAM_CHROOT}" = "yes" ]; then
-    log_info_chroot "Checking if multilib repository is enabled for Steam..."
-    if grep -q "^\s*\[multilib\]" /etc/pacman.conf && grep -A1 "^\s*\[multilib\]" /etc/pacman.conf | grep -q "^\s*Include = /etc/pacman.d/mirrorlist"; then
-        log_info_chroot "Multilib repository appears to be enabled. Installing Steam..."
-        pacman -S --noconfirm --needed steam lib32-mesa; check_cmd_chroot "Failed to install steam and lib32-mesa."
-        log_info_chroot "Steam installed."
-    else
-        log_error_chroot "Multilib repository is not enabled in /etc/pacman.conf. Steam installation aborted. Please enable it first."
-    fi
-fi
-
-log_info_chroot "Chroot setup complete."
-exit 0
+# umount -R /mnt # スクリプト終了後に手動実行を促す
+# reboot
