@@ -1,3 +1,4 @@
+cat << CHROOT_SCRIPT_EOF > /mnt/root/chroot-setup.sh
 #!/bin/bash
 set -euo pipefail
 
