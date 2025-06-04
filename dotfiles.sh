@@ -135,7 +135,7 @@ load_config() {
 prompt_initial_settings() {
     log_info "Starting initial configuration (prompts will override $CONFIG_FILE values if provided)..."
     log_info "Available block devices:"
-    lsblk -f
+    fdisk -l
     echo "You can also use 'fdisk -l' for more details."
     echo "Enter the installation disk (e.g., /dev/sda, /dev/nvme0n1):"
     read -r DISK
