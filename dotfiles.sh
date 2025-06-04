@@ -19,12 +19,14 @@ TIMEZONE_CONFIG="Asia/Tokyo"
 LOCALE_LANG_CONFIG="ja_JP.UTF-8"
 KEYMAP_CONFIG="jp106"
 REFLECTOR_COUNTRY_CODE="Japan"
-SWAP_DEFAULT_SIZE="4G"
+SWAP_DEFAULT_SIZE="0"
 DESKTOP_ENVIRONMENT="minimal"
 DISPLAY_MANAGER_CONFIG="none"
 AUTOLOGIN_USER_CONFIG=""
 TERMINAL_PACKAGE_CONFIG=""
 ADDITIONAL_UTILITY_PACKAGES_CONFIG=""
+INSTALL_BASE_DEVEL="no"
+TEXT_EDITOR="vim"
 
 # スクリプト内でユーザー入力や処理により設定される変数
 DISK=""
@@ -110,34 +112,22 @@ check_required_commands() {
 # 設定ファイル読み込み
 # ==========================
 load_config() {
-    log_info "Loading configuration from $CONFIG_FILE..."
-    if [ ! -f "$CONFIG_FILE" ]; then
-        log_error "Configuration file $CONFIG_FILE not found. Using defaults and prompting for crucial settings."
-        # crucial settings (like USERNAME, DISK) will be prompted anyway
-        return
+    if [ -f "$CONFIG_FILE" ]; then
+        source "$CONFIG_FILE"
     fi
-    # sourceする前に変数を一度デフォルト値で初期化（設定ファイルにない項目があってもエラーにならないように）
-    HOSTNAME_CONFIG="${HOSTNAME_CONFIG}"
-    TIMEZONE_CONFIG="${TIMEZONE_CONFIG}"
-    # ... (他の設定項目も同様に)
+}
 
-    # shellcheck source=/dev/null
-    source "$CONFIG_FILE"
-
-    # 必須パラメータのチェック (例)
-    local required_vars=("HOSTNAME_CONFIG" "TIMEZONE_CONFIG" "LOCALE_LANG_CONFIG" "KEYMAP_CONFIG" "DESKTOP_ENVIRONMENT" "DISPLAY_MANAGER_CONFIG")
-    local missing_vars=0
-    for var_name in "${required_vars[@]}"; do
-        if [ -z "${!var_name}" ]; then # 間接参照で変数の値を確認
-            log_warn "Required parameter '$var_name' is missing or empty in $CONFIG_FILE. Using default or will prompt."
-            # missing_vars=$((missing_vars + 1)) # 必須度合いに応じてエラーにするか警告に留めるか
-        fi
-    done
-    # if [ $missing_vars -gt 0 ]; then
-    #     log_error "Aborting due to missing critical parameters in $CONFIG_FILE."
-    #     exit 1
-    # fi
-    log_info "Configuration loaded."
+# パッケージリスト生成
+configure_environment_packages() {
+    local base_pkgs="base linux grub efibootmgr sudo $TEXT_EDITOR"
+    if [ "$INSTALL_BASE_DEVEL" = "yes" ]; then
+        base_pkgs="$base_pkgs base-devel"
+    fi
+    FINAL_PACKAGES_TO_INSTALL="$base_pkgs"
+    # 必要に応じて追加
+    if [ -n "$ADDITIONAL_UTILITY_PACKAGES_CONFIG" ]; then
+        FINAL_PACKAGES_TO_INSTALL="$FINAL_PACKAGES_TO_INSTALL $ADDITIONAL_UTILITY_PACKAGES_CONFIG"
+    fi
 }
 
 # ==========================
@@ -539,7 +529,7 @@ main() {
     check_required_commands
     load_config
     prompt_initial_settings
-    configure_environment_packages # パッケージリストとDMサービスをここで決定
+    configure_environment_packages
     confirm_installation
     partition_disk
     format_partitions
