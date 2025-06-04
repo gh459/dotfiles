@@ -455,7 +455,6 @@ else
 fi
 #!/bin/bash
 
-# YAYインストール確認とインストール処理の追加
 install_yay_prompt() {
   echo "Do you want to install yay (AUR helper)? (yes/no)"
   read -r install_yay_choice
@@ -478,11 +477,6 @@ install_yay_prompt() {
 
 # メイン処理のどこかで呼び出す
 install_yay_prompt
-
-sudo pacman -S --needed base-devel git
-git clone https://aur.archlinux.org/yay.git
-cd yay
-makepkg -si
 
 log_info_chroot "Enabling essential services (NetworkManager)..."
 systemctl enable NetworkManager; check_cmd_chroot "Failed to enable NetworkManager service."
