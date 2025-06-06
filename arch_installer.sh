@@ -1,188 +1,207 @@
 #!/bin/bash
+# install.sh - Main Arch Linux installation script
 
-# 設定ファイルの読み込み
-source arch_install_config.conf
+# Exit immediately if a command exits with a non-zero status.
+set -e
 
-# 基本構成のセットアップ
-echo "Arch Linux 基本構成のセットアップを開始します..."
-pacman -Sy --noconfirm
+# --- Configuration ---
+TIMEZONE="Asia/Tokyo"
+LOCALE_LANG="ja_JP.UTF-8"
+VCONSOLE_KEYMAP="jp106"
 
-# ディスク一覧の表示と選択
-echo "ディスク一覧:"
-lsblk
-read -p "インストール先のディスクを入力してください (例: /dev/sda): " target_disk
+# --- Helper Functions ---
+info() {
+    echo -e "\e[32m[INFO]\e[0m $1"
+}
 
-# スワップパーティションの作成
-read -p "スワップパーティションを作成しますか? (y/n): " create_swap
-if [ "$create_swap" == "y" ]; then
-  swap_size=2G
-  echo "スワップパーティションを ${swap_size} で作成します。"
-fi
+error() {
+    echo -e "\e[31m[ERROR]\e[0m $1" >&2
+    exit 1
+}
 
-# データの削除とフォーマット、パーティション作成
-echo "ディスクのデータを削除し、フォーマットします..."
-# 実際のパーティション構成はユーザーに合わせる必要があるため、ここでは基本的な例を示します
-# parted などを使用してパーティションを作成する処理をここに記述
-# 例:
-# parted -s ${target_disk} mklabel gpt
-# parted -s ${target_disk} mkpart primary ext4 0% 100%
-# mkfs.ext4 ${target_disk}1
+# --- Main Functions ---
 
-# マウント
-mount ${target_disk}1 /mnt
+# 1. Pre-installation checks
+pre_install_checks() {
+    info "Starting pre-installation checks..."
 
-# 基本システムのインストール
-echo "基本システムをインストールします..."
-pacstrap /mnt base base-devel linux linux-firmware vim
+    # Check for UEFI boot mode
+    if [ ! -d /sys/firmware/efi/efivars ]; then
+        error "UEFI boot mode not detected. This script only supports UEFI systems."
+    fi
+    info "UEFI boot mode confirmed."
 
-# fstab の生成
-genfstab -U /mnt >> /mnt/etc/fstab
+    # Check for internet connection
+    if ! ping -c 1 archlinux.org &>/dev/null; then
+        error "No internet connection. Please connect to the internet and try again."
+    fi
+    info "Internet connection confirmed."
 
-# chroot 環境に入るためのスクリプト
-cat <<EOF > arch_chroot.sh
-#!/bin/bash
-arch-chroot /mnt bash -c "
-  # タイムゾーンの設定
-  ln -sf /usr/share/zoneinfo/Japan /etc/localtime
-  hwclock --systohc
+    # Update system clock
+    info "Updating system clock..."
+    timedatectl set-ntp true
+    info "System clock updated."
+}
 
-  # ロケールの設定
-  echo 'LANG=ja_JP.UTF-8' > /etc/locale.conf
-  locale-gen
+# 2. Disk partitioning and formatting
+setup_disk() {
+    info "Listing available disks..."
+    lsblk -d -o NAME,SIZE,MODEL
 
-  # ホスト名の設定
-  echo 'archlinux' > /etc/hostname
+    read -p "Enter the disk to install Arch Linux on (e.g., /dev/sda, /dev/nvme0n1): " INSTALL_DISK
+    if [ ! -b "$INSTALL_DISK" ]; then
+        error "Invalid disk selected: $INSTALL_DISK"
+    fi
 
-  # ネットワーク設定
-  systemctl enable dhcpcd
+    read -p "Do you want to create a swap partition (8GB)? [y/N]: " CREATE_SWAP
 
-  # root パスワードの設定
-  echo 'root:password' | chpasswd
+    info "THIS WILL DELETE ALL DATA ON $INSTALL_DISK. Are you sure?"
+    read -p "Type 'YES' to continue: " CONFIRM_DELETE
+    if [ "$CONFIRM_DELETE" != "YES" ]; then
+        error "Installation aborted by user."
+    fi
 
-  # ユーザー作成
-  read -p 'ユーザー名を入力してください: ' username
-  read -sp 'パスワードを入力してください: ' password
-  echo
-  useradd -m -g users -G wheel ${username}
-  echo \"${username}:${password}\" | chpasswd
-  
-  # sudo を許可
-  sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
+    info "Partitioning $INSTALL_DISK..."
+    # Wipe existing partition table
+    sgdisk --zap-all "$INSTALL_DISK"
 
-  # 自動ログインの設定
-  read -p '自動ログインを有効にしますか? (y/n): ' autologin
-  if [ \"\$autologin\" == \"y\" ]; then
-    systemctl enable getty@tty1.service
-    echo \"[Service]\" > /etc/systemd/system/getty@tty1.service.d/override.conf
-    echo \"ExecStart=\" >> /etc/systemd/system/getty@tty1.service.d/override.conf
-    echo \"ExecStart=-/usr/bin/agetty --autologin ${username} %I \$TERM\" >> /etc/systemd/system/getty@tty1.service.d/override.conf
-  fi
+    parted -s "$INSTALL_DISK" \
+        mklabel gpt \
+        mkpart ESP fat32 1MiB 513MiB \
+        set 1 esp on
 
-  # デスクトップ環境の選択
-  echo 'デスクトップ環境を選択してください:'
-  select desktop in \${desktop_environments[@]}; do
-    break
-  done
-  echo \"選択されたデスクトップ環境: \$desktop\"
-  case \$desktop in
-    GNOME)
-      pacman -S --noconfirm gnome gnome-extra
-      ;;
-    \"KDE Plasma\")
-      pacman -S --noconfirm plasma-meta kde-applications
-      ;;
-    XFCE)
-      pacman -S --noconfirm xfce4 xfce4-goodies
-      ;;
-    LXQt)
-      pacman -S --noconfirm lxqt
-      ;;
-    Mate)
-      pacman -S --noconfirm mate mate-extra
-      ;;
-    *)
-      echo '無効な選択です'
-      exit 1
-      ;;
-  esac
+    if [[ "$CREATE_SWAP" =~ ^[Yy]$ ]]; then
+        parted -s "$INSTALL_DISK" \
+            mkpart swap linux-swap 513MiB 8705MiB \
+            mkpart root ext4 8705MiB 100%
+        
+        if [[ "$INSTALL_DISK" == *"nvme"* ]]; then
+            EFI_PARTITION="${INSTALL_DISK}p1"
+            SWAP_PARTITION="${INSTALL_DISK}p2"
+            ROOT_PARTITION="${INSTALL_DISK}p3"
+        else
+            EFI_PARTITION="${INSTALL_DISK}1"
+            SWAP_PARTITION="${INSTALL_DISK}2"
+            ROOT_PARTITION="${INSTALL_DISK}3"
+        fi
+        
+        info "Formatting partitions..."
+        mkfs.fat -F32 "$EFI_PARTITION"
+        mkswap "$SWAP_PARTITION"
+        mkfs.ext4 -F "$ROOT_PARTITION"
 
-  # ログイン環境の選択
-  echo 'ログイン環境を選択してください:'
-  select login_env in \${login_environments[@]}; do
-    break
-  done
-  echo \"選択されたログイン環境: \$login_env\"
-  case \$login_env in
-    SDDM)
-      pacman -S --noconfirm sddm
-      systemctl enable sddm
-      ;;
-    LightDM)
-      pacman -S --noconfirm lightdm lightdm-gtk-greeter
-      systemctl enable lightdm
-      ;;
-    GDM)
-      pacman -S --noconfirm gdm
-      systemctl enable gdm
-      ;;
-    LXDM)
-      pacman -S --noconfirm lxdm
-      systemctl enable lxdm
-      ;;
-    \"No DM (TTY login)\")
-      ;;
-    *)
-      echo '無効な選択です'
-      exit 1
-      ;;
-  esac
+        info "Mounting file systems..."
+        mount "$ROOT_PARTITION" /mnt
+        swapon "$SWAP_PARTITION"
+        mkdir -p /mnt/boot
+        mount "$EFI_PARTITION" /mnt/boot
+    else
+        parted -s "$INSTALL_DISK" \
+            mkpart root ext4 513MiB 100%
 
-  # ターミナルエミュレータのインストール
-  echo 'ターミナルエミュレータを選択してください:'
-  select terminal in \${terminal_emulators[@]}; do
-    break
-  done
-  echo \"選択されたターミナルエミュレータ: \$terminal\"
-  pacman -S --noconfirm \$terminal
+        if [[ "$INSTALL_DISK" == *"nvme"* ]]; then
+            EFI_PARTITION="${INSTALL_DISK}p1"
+            ROOT_PARTITION="${INSTALL_DISK}p2"
+        else
+            EFI_PARTITION="${INSTALL_DISK}1"
+            ROOT_PARTITION="${INSTALL_DISK}2"
+        fi
 
-  # yay のインストール
-  git clone https://aur.archlinux.org/yay.git /tmp/yay
-  chown -R ${username}:${username} /tmp/yay
-  su ${username} -c 'cd /tmp/yay && makepkg -si --noconfirm'
+        info "Formatting partitions..."
+        mkfs.fat -F32 "$EFI_PARTITION"
+        mkfs.ext4 -F "$ROOT_PARTITION"
 
-  # ブラウザのインストール
-  echo 'ブラウザを選択してください:'
-  select browser in \${browsers[@]}; do
-    break
-  done
-  echo \"選択されたブラウザ: \$browser\"
-  case \$browser in
-    chrome)
-      su ${username} -c 'yay -S google-chrome --noconfirm'
-      ;;
-    firefox)
-      pacman -S --noconfirm firefox
-      ;;
-    *)
-      echo '無効な選択です'
-      exit 1
-      ;;
-  esac
+        info "Mounting file systems..."
+        mount "$ROOT_PARTITION" /mnt
+        mkdir -p /mnt/boot
+        mount "$EFI_PARTITION" /mnt/boot
+    fi
 
-  # STEAM と PROTONUP-QT のインストール
-  read -p 'STEAM と PROTONUP-QT をインストールしますか? (y/n): ' install_steam
-  if [ \"\$install_steam\" == \"y\" ]; then
-    su ${username} -c 'yay -S steam protonup-qt --noconfirm'
-  fi
+    info "Disk setup complete."
+}
 
-  echo 'インストールが完了しました。再起動してください。'
-"
-EOF
+# 3. User and Desktop Environment setup
+setup_user_and_de() {
+    info "Setting up user and desktop environment choices..."
+    
+    read -p "Enter your desired username: " USERNAME
+    read -s -p "Enter your password: " PASSWORD
+    echo
+    read -s -p "Confirm your password: " PASSWORD_CONFIRM
+    echo
+    if [ "$PASSWORD" != "$PASSWORD_CONFIRM" ]; then
+        error "Passwords do not match."
+    fi
 
-chmod +x arch_chroot.sh
-./arch_chroot.sh
+    read -p "Enable autologin? [y/N]: " AUTOLOGIN_CHOICE
+    [[ "$AUTOLOGIN_CHOICE" =~ ^[Yy]$ ]] && AUTOLOGIN="true" || AUTOLOGIN="false"
 
-# アンマウント
-umount /mnt
+    info "Please choose a Desktop Environment:"
+    echo "1) GNOME"
+    echo "2) KDE Plasma"
+    echo "3) XFCE"
+    echo "4) Cinnamon"
+    echo "5) MATE"
+    read -p "Enter the number of your choice [1-5]: " DE_CHOICE
 
-echo "インストールが完了しました。再起動してください。"
+    case $DE_CHOICE in
+        1) DE_PACKAGES="gnome gdm gnome-terminal"; DM="gdm";;
+        2) DE_PACKAGES="plasma-meta sddm konsole"; DM="sddm";;
+        3) DE_PACKAGES="xfce4 xfce4-goodies lightdm lightdm-gtk-greeter xfce4-terminal"; DM="lightdm";;
+        4) DE_PACKAGES="cinnamon lightdm lightdm-gtk-greeter gnome-terminal"; DM="lightdm";;
+        5) DE_PACKAGES="mate mate-extra lightdm lightdm-gtk-greeter mate-terminal"; DM="lightdm";;
+        *) error "Invalid choice. Exiting.";;
+    esac
+
+    read -p "Install Steam? [y/N]: " INSTALL_STEAM
+    [[ "$INSTALL_STEAM" =~ ^[Yy]$ ]] && STEAM="true" || STEAM="false"
+    read -p "Install ProtonUp-Qt? [y/N]: " INSTALL_PROTONUP
+    [[ "$INSTALL_PROTONUP" =~ ^[Yy]$ ]] && PROTONUP="true" || PROTONUP="false"
+
+    info "Configuration complete."
+}
+
+# 4. Core installation
+install_system() {
+    info "Installing base system (pacstrap). This may take a while..."
+    pacstrap /mnt base linux linux-firmware base-devel git sudo grub efibootmgr networkmanager
+
+    info "Generating fstab..."
+    genfstab -U /mnt >> /mnt/etc/fstab
+
+    info "Copying chroot script to new system..."
+    cp chroot_config.sh /mnt/chroot_config.sh
+    chmod +x /mnt/chroot_config.sh
+
+    info "Chrooting into new system to continue setup..."
+    arch-chroot /mnt ./chroot_config.sh \
+        "$TIMEZONE" "$LOCALE_LANG" "$VCONSOLE_KEYMAP" "$USERNAME" "$PASSWORD" \
+        "$DE_PACKAGES" "$DM" "$AUTOLOGIN" "$STEAM" "$PROTONUP"
+
+    # Cleanup
+    rm /mnt/chroot_config.sh
+}
+
+# 5. Finalization
+finalize_installation() {
+    info "Unmounting all partitions..."
+    umount -R /mnt
+    
+    if [[ "$CREATE_SWAP" =~ ^[Yy]$ ]]; then
+        swapoff -a
+    fi
+
+    info "Installation finished! You can now reboot your system."
+    echo "Type 'reboot' to restart your computer."
+}
+
+# --- Main Script Execution ---
+main() {
+    pre_install_checks
+    setup_disk
+    setup_user_and_de
+    install_system
+    finalize_installation
+}
+
+main
