@@ -1,143 +1,218 @@
 #!/bin/bash
 
+# Arch Linux 一括インストールスクリプト
+# rootユーザーで実行してください
+
 set -e
 
-CONFIG_FILE="./arch_installer.conf"
+# --- 文字化け防止 ---
+export LANG=ja_JP.UTF-8
+export LC_ALL=ja_JP.UTF-8
 
-# ヘルパー関数
-ask_confirm() {
-    while true; do
-        read -rp "$1 (y/n): " yn
-        case $yn in
-            [Yy]*) return 0 ;;
-            [Nn]*) return 1 ;;
-            *) echo "yまたはnで答えてください。" ;;
-        esac
-    done
-}
-
-ask_choice() {
-    local prompt="$1"
-    shift
-    local choices=("$@")
-    echo "$prompt"
-    for i in "${!choices[@]}"; do
-        echo "$((i+1))) ${choices[$i]}"
-    done
-    while true; do
-        read -rp "番号を選んで入力してください: " num
-        if [[ $num =~ ^[1-9][0-9]*$ ]] && (( num >= 1 && num <= ${#choices[@]} )); then
-            echo "${choices[$((num-1))]}"
-            return 0
-        else
-            echo "有効な番号を入力してください"
-        fi
-    done
-}
-
-write_config() {
-    cat <<EOF >"$CONFIG_FILE"
-DISK=$DISK
-CREATE_SWAP=$CREATE_SWAP
-SWAP_SIZE=$SWAP_SIZE
-USERNAME=$USERNAME
-PASSWORD=$PASSWORD
-AUTOLOGIN=$AUTOLOGIN
-DESKTOP=$DESKTOP
-LOGIN_MANAGER=$LOGIN_MANAGER
-TERMINAL=$TERMINAL
-BROWSER=chrome
-INSTALL_STEAM=$INSTALL_STEAM
-INSTALL_PROTONUP=$INSTALL_PROTONUP
-EOF
-}
-
-# ディスク一覧表示
-echo "使用可能なディスク:"
+# --- ディスク選択 ---
+echo "ディスク一覧:"
 lsblk -d -o NAME,SIZE,MODEL
-read -rp "インストール先のディスク名(例: sda, nvme0n1など)を入力してください: " DISK
+read -rp "インストールするディスク名 (例: sda): " DISK
 
-while [[ ! -b "/dev/$DISK" ]]; do
-    echo "存在しないディスクです。"
-    read -rp "もう一度入力してください: " DISK
+# --- スワップパーティション作成有無 ---
+while true; do
+    read -rp "スワップパーティションを作成しますか？ (y/n): " CREATE_SWAP
+    case "$CREATE_SWAP" in
+        [Yy]*) SWAP="yes"; break ;;
+        [Nn]*) SWAP="no"; break ;;
+        *) echo "yまたはnで答えてください。" ;;
+    esac
 done
 
-# スワップパーティション作成有無
-if ask_confirm "スワップパーティションを作成しますか？"; then
-    CREATE_SWAP="yes"
-    read -rp "スワップサイズ(例: 2G, 4096M): " SWAP_SIZE
-else
-    CREATE_SWAP="no"
-    SWAP_SIZE=""
-fi
+# --- ユーザー名とパスワード ---
+read -rp "新規ユーザー名: " USERNAME
+while true; do
+    read -rsp "ユーザーのパスワード: " USERPASS
+    echo
+    read -rsp "パスワード再入力: " USERPASS2
+    echo
+    [ "$USERPASS" = "$USERPASS2" ] && break
+    echo "パスワードが一致しません。"
+done
 
-# パーティション作成・フォーマット
-echo "/dev/$DISK のパーティションを作成します。"
+# --- 自動ログイン有無 ---
+while true; do
+    read -rp "自動ログインを有効にしますか？ (y/n): " AUTOLOGIN
+    case "$AUTOLOGIN" in
+        [Yy]*) AUTOLOGIN="yes"; break ;;
+        [Nn]*) AUTOLOGIN="no"; break ;;
+        *) echo "yまたはnで答えてください。" ;;
+    esac
+done
+
+# --- デスクトップ環境選択 ---
+DE_OPTIONS=("GNOME" "KDE Plasma" "XFCE" "Cinnamon" "MATE")
+echo "デスクトップ環境を選択してください:"
+select DE in "${DE_OPTIONS[@]}"; do
+    [ -n "$DE" ] && break
+done
+
+# --- ログイン環境（ディスプレイマネージャ）選択 ---
+DM_OPTIONS=("GDM" "SDDM" "LightDM" "LXDM" "None")
+echo "ディスプレイマネージャを選択してください:"
+select DM in "${DM_OPTIONS[@]}"; do
+    [ -n "$DM" ] && break
+done
+
+# --- ターミナルエミュレータ選択 ---
+TERM_OPTIONS=("gnome-terminal" "konsole" "xfce4-terminal" "lxterminal" "mate-terminal")
+echo "ターミナルエミュレータを選択してください:"
+select TERMINAL in "${TERM_OPTIONS[@]}"; do
+    [ -n "$TERMINAL" ] && break
+done
+
+# --- STEAM/PROTONUP-QT ---
+while true; do
+    read -rp "STEAMをインストールしますか？ (y/n): " INSTALL_STEAM
+    case "$INSTALL_STEAM" in
+        [Yy]*) INSTALL_STEAM="yes"; break ;;
+        [Nn]*) INSTALL_STEAM="no"; break ;;
+        *) echo "yまたはnで答えてください。" ;;
+    esac
+done
+
+while true; do
+    read -rp "PROTONUP-QTをインストールしますか？ (y/n): " INSTALL_PROTON
+    case "$INSTALL_PROTON" in
+        [Yy]*) INSTALL_PROTON="yes"; break ;;
+        [Nn]*) INSTALL_PROTON="no"; break ;;
+        *) echo "yまたはnで答えてください。" ;;
+    esac
+done
+
+# --- パーティション・フォーマット・マウント ---
+echo "ディスクのパーティションとフォーマットを開始します。"
+umount -A --recursive /mnt || true
+
 sgdisk -Z "/dev/$DISK"
-sgdisk -n 1:0:+512M -t 1:ef00 "/dev/$DISK"
-if [[ $CREATE_SWAP == "yes" ]]; then
-    sgdisk -n 2:0:-${SWAP_SIZE} -t 2:8300 "/dev/$DISK"
-    sgdisk -n 3:0:0 -t 3:8200 "/dev/$DISK"
-    ROOT_PART="/dev/${DISK}2"
-    SWAP_PART="/dev/${DISK}3"
+sgdisk -n 1:0:+512M -t 1:ef00 -c 1:"EFI" "/dev/$DISK"
+if [ "$SWAP" = "yes" ]; then
+    sgdisk -n 2:0:+4G -t 2:8200 -c 2:"SWAP" "/dev/$DISK"
+    sgdisk -n 3:0:0 -t 3:8300 -c 3:"ROOT" "/dev/$DISK"
 else
-    sgdisk -n 2:0:0 -t 2:8300 "/dev/$DISK"
-    ROOT_PART="/dev/${DISK}2"
-    SWAP_PART=""
-fi
-EFI_PART="/dev/${DISK}1"
-
-# パーティション フォーマット
-mkfs.fat -F32 "$EFI_PART"
-mkfs.ext4 "$ROOT_PART"
-if [[ $CREATE_SWAP == "yes" ]]; then
-    mkswap "$SWAP_PART"
+    sgdisk -n 2:0:0 -t 2:8300 -c 2:"ROOT" "/dev/$DISK"
 fi
 
-# マウント
-mount "$ROOT_PART" /mnt
+sync
+
+# --- フォーマット ---
+mkfs.fat -F32 "/dev/${DISK}1"
+if [ "$SWAP" = "yes" ]; then
+    mkswap "/dev/${DISK}2"
+    mkfs.ext4 "/dev/${DISK}3"
+else
+    mkfs.ext4 "/dev/${DISK}2"
+fi
+
+# --- マウント ---
+if [ "$SWAP" = "yes" ]; then
+    mount "/dev/${DISK}3" /mnt
+    swapon "/dev/${DISK}2"
+else
+    mount "/dev/${DISK}2" /mnt
+fi
 mkdir -p /mnt/boot/efi
-mount "$EFI_PART" /mnt/boot/efi
-if [[ $CREATE_SWAP == "yes" ]]; then
-    swapon "$SWAP_PART"
-fi
+mount "/dev/${DISK}1" /mnt/boot/efi
 
-# ベースシステムインストール
+# --- ベースシステムインストール ---
 pacstrap /mnt base linux linux-firmware networkmanager sudo
 
-# fstab 生成
+# --- fstab生成 ---
 genfstab -U /mnt >> /mnt/etc/fstab
 
-# ユーザー名・パスワード
-read -rp "new username: " USERNAME
-read -rsp "password: " PASSWORD
-echo
+# --- chroot用スクリプト生成 ---
+cat << EOF > /mnt/install_in_chroot.sh
+#!/bin/bash
+set -e
 
-# 自動ログイン
-if ask_confirm "Enable automatic login?？"; then
-    AUTOLOGIN="yes"
-else
-    AUTOLOGIN="no"
+ln -sf /usr/share/zoneinfo/Asia/Tokyo /etc/localtime
+hwclock --systohc
+
+sed -i 's/#ja_JP.UTF-8/ja_JP.UTF-8/' /etc/locale.gen
+locale-gen
+echo "LANG=ja_JP.UTF-8" > /etc/locale.conf
+
+echo archlinux > /etc/hostname
+
+echo -e "127.0.0.1\tlocalhost\n::1\tlocalhost\n127.0.1.1\tarchlinux.localdomain\tarchlinux" >> /etc/hosts
+
+echo "root:root" | chpasswd
+
+useradd -m -G wheel,audio,video $USERNAME
+echo "$USERNAME:$USERPASS" | chpasswd
+
+sed -i 's/# %wheel ALL=(ALL) ALL/%wheel ALL=(ALL) ALL/' /etc/sudoers
+
+systemctl enable NetworkManager
+
+# デスクトップ環境
+case "$DE" in
+    "GNOME") pacman -Sy --noconfirm gnome gnome-tweaks ;;
+    "KDE Plasma") pacman -Sy --noconfirm plasma kde-applications ;;
+    "XFCE") pacman -Sy --noconfirm xfce4 xfce4-goodies ;;
+    "Cinnamon") pacman -Sy --noconfirm cinnamon ;;
+    "MATE") pacman -Sy --noconfirm mate mate-extra ;;
+esac
+
+# ディスプレイマネージャ
+case "$DM" in
+    "GDM") pacman -Sy --noconfirm gdm && systemctl enable gdm ;;
+    "SDDM") pacman -Sy --noconfirm sddm && systemctl enable sddm ;;
+    "LightDM") pacman -Sy --noconfirm lightdm lightdm-gtk-greeter && systemctl enable lightdm ;;
+    "LXDM") pacman -Sy --noconfirm lxdm && systemctl enable lxdm ;;
+    "None") ;;
+esac
+
+# ターミナルエミュレータ
+case "$TERMINAL" in
+    "gnome-terminal") pacman -Sy --noconfirm gnome-terminal ;;
+    "konsole") pacman -Sy --noconfirm konsole ;;
+    "xfce4-terminal") pacman -Sy --noconfirm xfce4-terminal ;;
+    "lxterminal") pacman -Sy --noconfirm lxterminal ;;
+    "mate-terminal") pacman -Sy --noconfirm mate-terminal ;;
+esac
+
+# ブラウザ
+pacman -Sy --noconfirm google-chrome
+
+# STEAM
+if [ "$INSTALL_STEAM" = "yes" ]; then
+    pacman -Sy --noconfirm steam
 fi
 
-# デスクトップ環境, ログインマネージャ, ターミナルエミュレータ選択
-DESKTOP=$(ask_choice "Please select your desktop environment." "gnome" "kde" "xfce" "lxqt" "cinnamon")
-LOGIN_MANAGER=$(ask_choice "Please select a login manager." "gdm" "sddm" "lightdm" "lxdm" "none")
-TERMINAL=$(ask_choice "Please select a terminal emulator." "gnome-terminal" "konsole" "xfce4-terminal" "lxterminal" "tilix")
+# PROTONUP-QT
+if [ "$INSTALL_PROTON" = "yes" ]; then
+    pacman -Sy --noconfirm protonup-qt
+fi
 
-# Chromeインストール固定
-# Steam, ProtonUP-QT
-INSTALL_STEAM=$(ask_confirm "Install Steam?？" && echo "yes" || echo "no")
-INSTALL_PROTONUP=$(ask_confirm "Install ProtonUP-QT?？" && echo "yes" || echo "no")
+# ブートローダー
+pacman -Sy --noconfirm grub efibootmgr os-prober
+grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB
+grub-mkconfig -o /boot/grub/grub.cfg
 
-# confファイル書き出し
-write_config
+if [ "$AUTOLOGIN" = "yes" ]; then
+    if [ "$DM" = "GDM" ]; then
+        mkdir -p /etc/gdm
+        echo -e "[daemon]\nAutomaticLoginEnable=True\nAutomaticLogin=$USERNAME" > /etc/gdm/custom.conf
+    elif [ "$DM" = "SDDM" ]; then
+        sed -i "/^User=/c User=$USERNAME" /etc/sddm.conf || echo -e "[Autologin]\nUser=$USERNAME" >> /etc/sddm.conf
+    elif [ "$DM" = "LightDM" ]; then
+        mkdir -p /etc/lightdm
+        echo -e "[Seat:*]\nautologin-user=$USERNAME" >> /etc/lightdm/lightdm.conf
+    fi
+fi
 
-# chrootシェルスクリプトを/mnt/root/setup.shとして設置
-cp "$(dirname "$0")/arch_installer_chroot.sh" /mnt/root/setup.sh
-cp "$CONFIG_FILE" /mnt/root/arch_installer.conf
-chmod +x /mnt/root/setup.sh
+EOF
 
-arch-chroot /mnt /root/setup.sh
+chmod +x /mnt/install_in_chroot.sh
 
-echo "インストール完了！再起動してください。"
+arch-chroot /mnt /install_in_chroot.sh
+
+rm /mnt/install_in_chroot.sh
+
+echo "インストール完了。アンマウント後、再起動してください。"
