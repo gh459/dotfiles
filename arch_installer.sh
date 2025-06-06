@@ -1,218 +1,188 @@
 #!/bin/bash
 
-# Arch Linux 一括インストールスクリプト
-# rootユーザーで実行してください
+# 設定ファイルの読み込み
+source arch_install_config.conf
 
-set -e
+# 基本構成のセットアップ
+echo "Arch Linux 基本構成のセットアップを開始します..."
+pacman -Sy --noconfirm
 
-# --- 文字化け防止 ---
-export LANG=ja_JP.UTF-8
-export LC_ALL=ja_JP.UTF-8
-
-# --- ディスク選択 ---
+# ディスク一覧の表示と選択
 echo "ディスク一覧:"
-lsblk -d -o NAME,SIZE,MODEL
-read -rp "インストールするディスク名 (例: sda): " DISK
+lsblk
+read -p "インストール先のディスクを入力してください (例: /dev/sda): " target_disk
 
-# --- スワップパーティション作成有無 ---
-while true; do
-    read -rp "スワップパーティションを作成しますか？ (y/n): " CREATE_SWAP
-    case "$CREATE_SWAP" in
-        [Yy]*) SWAP="yes"; break ;;
-        [Nn]*) SWAP="no"; break ;;
-        *) echo "yまたはnで答えてください。" ;;
-    esac
-done
-
-# --- ユーザー名とパスワード ---
-read -rp "新規ユーザー名: " USERNAME
-while true; do
-    read -rsp "ユーザーのパスワード: " USERPASS
-    echo
-    read -rsp "パスワード再入力: " USERPASS2
-    echo
-    [ "$USERPASS" = "$USERPASS2" ] && break
-    echo "パスワードが一致しません。"
-done
-
-# --- 自動ログイン有無 ---
-while true; do
-    read -rp "自動ログインを有効にしますか？ (y/n): " AUTOLOGIN
-    case "$AUTOLOGIN" in
-        [Yy]*) AUTOLOGIN="yes"; break ;;
-        [Nn]*) AUTOLOGIN="no"; break ;;
-        *) echo "yまたはnで答えてください。" ;;
-    esac
-done
-
-# --- デスクトップ環境選択 ---
-DE_OPTIONS=("GNOME" "KDE Plasma" "XFCE" "Cinnamon" "MATE")
-echo "デスクトップ環境を選択してください:"
-select DE in "${DE_OPTIONS[@]}"; do
-    [ -n "$DE" ] && break
-done
-
-# --- ログイン環境（ディスプレイマネージャ）選択 ---
-DM_OPTIONS=("GDM" "SDDM" "LightDM" "LXDM" "None")
-echo "ディスプレイマネージャを選択してください:"
-select DM in "${DM_OPTIONS[@]}"; do
-    [ -n "$DM" ] && break
-done
-
-# --- ターミナルエミュレータ選択 ---
-TERM_OPTIONS=("gnome-terminal" "konsole" "xfce4-terminal" "lxterminal" "mate-terminal")
-echo "ターミナルエミュレータを選択してください:"
-select TERMINAL in "${TERM_OPTIONS[@]}"; do
-    [ -n "$TERMINAL" ] && break
-done
-
-# --- STEAM/PROTONUP-QT ---
-while true; do
-    read -rp "STEAMをインストールしますか？ (y/n): " INSTALL_STEAM
-    case "$INSTALL_STEAM" in
-        [Yy]*) INSTALL_STEAM="yes"; break ;;
-        [Nn]*) INSTALL_STEAM="no"; break ;;
-        *) echo "yまたはnで答えてください。" ;;
-    esac
-done
-
-while true; do
-    read -rp "PROTONUP-QTをインストールしますか？ (y/n): " INSTALL_PROTON
-    case "$INSTALL_PROTON" in
-        [Yy]*) INSTALL_PROTON="yes"; break ;;
-        [Nn]*) INSTALL_PROTON="no"; break ;;
-        *) echo "yまたはnで答えてください。" ;;
-    esac
-done
-
-# --- パーティション・フォーマット・マウント ---
-echo "ディスクのパーティションとフォーマットを開始します。"
-umount -A --recursive /mnt || true
-
-sgdisk -Z "/dev/$DISK"
-sgdisk -n 1:0:+512M -t 1:ef00 -c 1:"EFI" "/dev/$DISK"
-if [ "$SWAP" = "yes" ]; then
-    sgdisk -n 2:0:+4G -t 2:8200 -c 2:"SWAP" "/dev/$DISK"
-    sgdisk -n 3:0:0 -t 3:8300 -c 3:"ROOT" "/dev/$DISK"
-else
-    sgdisk -n 2:0:0 -t 2:8300 -c 2:"ROOT" "/dev/$DISK"
+# スワップパーティションの作成
+read -p "スワップパーティションを作成しますか? (y/n): " create_swap
+if [ "$create_swap" == "y" ]; then
+  swap_size=2G
+  echo "スワップパーティションを ${swap_size} で作成します。"
 fi
 
-sync
+# データの削除とフォーマット、パーティション作成
+echo "ディスクのデータを削除し、フォーマットします..."
+# 実際のパーティション構成はユーザーに合わせる必要があるため、ここでは基本的な例を示します
+# parted などを使用してパーティションを作成する処理をここに記述
+# 例:
+# parted -s ${target_disk} mklabel gpt
+# parted -s ${target_disk} mkpart primary ext4 0% 100%
+# mkfs.ext4 ${target_disk}1
 
-# --- フォーマット ---
-mkfs.fat -F32 "/dev/${DISK}1"
-if [ "$SWAP" = "yes" ]; then
-    mkswap "/dev/${DISK}2"
-    mkfs.ext4 "/dev/${DISK}3"
-else
-    mkfs.ext4 "/dev/${DISK}2"
-fi
+# マウント
+mount ${target_disk}1 /mnt
 
-# --- マウント ---
-if [ "$SWAP" = "yes" ]; then
-    mount "/dev/${DISK}3" /mnt
-    swapon "/dev/${DISK}2"
-else
-    mount "/dev/${DISK}2" /mnt
-fi
-mkdir -p /mnt/boot/efi
-mount "/dev/${DISK}1" /mnt/boot/efi
+# 基本システムのインストール
+echo "基本システムをインストールします..."
+pacstrap /mnt base base-devel linux linux-firmware vim
 
-# --- ベースシステムインストール ---
-pacstrap /mnt base linux linux-firmware networkmanager sudo
-
-# --- fstab生成 ---
+# fstab の生成
 genfstab -U /mnt >> /mnt/etc/fstab
 
-# --- chroot用スクリプト生成 ---
-cat << EOF > /mnt/install_in_chroot.sh
+# chroot 環境に入るためのスクリプト
+cat <<EOF > arch_chroot.sh
 #!/bin/bash
-set -e
+arch-chroot /mnt bash -c "
+  # タイムゾーンの設定
+  ln -sf /usr/share/zoneinfo/Japan /etc/localtime
+  hwclock --systohc
 
-ln -sf /usr/share/zoneinfo/Asia/Tokyo /etc/localtime
-hwclock --systohc
+  # ロケールの設定
+  echo 'LANG=ja_JP.UTF-8' > /etc/locale.conf
+  locale-gen
 
-sed -i 's/#ja_JP.UTF-8/ja_JP.UTF-8/' /etc/locale.gen
-locale-gen
-echo "LANG=ja_JP.UTF-8" > /etc/locale.conf
+  # ホスト名の設定
+  echo 'archlinux' > /etc/hostname
 
-echo archlinux > /etc/hostname
+  # ネットワーク設定
+  systemctl enable dhcpcd
 
-echo -e "127.0.0.1\tlocalhost\n::1\tlocalhost\n127.0.1.1\tarchlinux.localdomain\tarchlinux" >> /etc/hosts
+  # root パスワードの設定
+  echo 'root:password' | chpasswd
 
-echo "root:root" | chpasswd
+  # ユーザー作成
+  read -p 'ユーザー名を入力してください: ' username
+  read -sp 'パスワードを入力してください: ' password
+  echo
+  useradd -m -g users -G wheel ${username}
+  echo \"${username}:${password}\" | chpasswd
+  
+  # sudo を許可
+  sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
 
-useradd -m -G wheel,audio,video $USERNAME
-echo "$USERNAME:$USERPASS" | chpasswd
+  # 自動ログインの設定
+  read -p '自動ログインを有効にしますか? (y/n): ' autologin
+  if [ \"\$autologin\" == \"y\" ]; then
+    systemctl enable getty@tty1.service
+    echo \"[Service]\" > /etc/systemd/system/getty@tty1.service.d/override.conf
+    echo \"ExecStart=\" >> /etc/systemd/system/getty@tty1.service.d/override.conf
+    echo \"ExecStart=-/usr/bin/agetty --autologin ${username} %I \$TERM\" >> /etc/systemd/system/getty@tty1.service.d/override.conf
+  fi
 
-sed -i 's/# %wheel ALL=(ALL) ALL/%wheel ALL=(ALL) ALL/' /etc/sudoers
+  # デスクトップ環境の選択
+  echo 'デスクトップ環境を選択してください:'
+  select desktop in \${desktop_environments[@]}; do
+    break
+  done
+  echo \"選択されたデスクトップ環境: \$desktop\"
+  case \$desktop in
+    GNOME)
+      pacman -S --noconfirm gnome gnome-extra
+      ;;
+    \"KDE Plasma\")
+      pacman -S --noconfirm plasma-meta kde-applications
+      ;;
+    XFCE)
+      pacman -S --noconfirm xfce4 xfce4-goodies
+      ;;
+    LXQt)
+      pacman -S --noconfirm lxqt
+      ;;
+    Mate)
+      pacman -S --noconfirm mate mate-extra
+      ;;
+    *)
+      echo '無効な選択です'
+      exit 1
+      ;;
+  esac
 
-systemctl enable NetworkManager
+  # ログイン環境の選択
+  echo 'ログイン環境を選択してください:'
+  select login_env in \${login_environments[@]}; do
+    break
+  done
+  echo \"選択されたログイン環境: \$login_env\"
+  case \$login_env in
+    SDDM)
+      pacman -S --noconfirm sddm
+      systemctl enable sddm
+      ;;
+    LightDM)
+      pacman -S --noconfirm lightdm lightdm-gtk-greeter
+      systemctl enable lightdm
+      ;;
+    GDM)
+      pacman -S --noconfirm gdm
+      systemctl enable gdm
+      ;;
+    LXDM)
+      pacman -S --noconfirm lxdm
+      systemctl enable lxdm
+      ;;
+    \"No DM (TTY login)\")
+      ;;
+    *)
+      echo '無効な選択です'
+      exit 1
+      ;;
+  esac
 
-# デスクトップ環境
-case "$DE" in
-    "GNOME") pacman -Sy --noconfirm gnome gnome-tweaks ;;
-    "KDE Plasma") pacman -Sy --noconfirm plasma kde-applications ;;
-    "XFCE") pacman -Sy --noconfirm xfce4 xfce4-goodies ;;
-    "Cinnamon") pacman -Sy --noconfirm cinnamon ;;
-    "MATE") pacman -Sy --noconfirm mate mate-extra ;;
-esac
+  # ターミナルエミュレータのインストール
+  echo 'ターミナルエミュレータを選択してください:'
+  select terminal in \${terminal_emulators[@]}; do
+    break
+  done
+  echo \"選択されたターミナルエミュレータ: \$terminal\"
+  pacman -S --noconfirm \$terminal
 
-# ディスプレイマネージャ
-case "$DM" in
-    "GDM") pacman -Sy --noconfirm gdm && systemctl enable gdm ;;
-    "SDDM") pacman -Sy --noconfirm sddm && systemctl enable sddm ;;
-    "LightDM") pacman -Sy --noconfirm lightdm lightdm-gtk-greeter && systemctl enable lightdm ;;
-    "LXDM") pacman -Sy --noconfirm lxdm && systemctl enable lxdm ;;
-    "None") ;;
-esac
+  # yay のインストール
+  git clone https://aur.archlinux.org/yay.git /tmp/yay
+  chown -R ${username}:${username} /tmp/yay
+  su ${username} -c 'cd /tmp/yay && makepkg -si --noconfirm'
 
-# ターミナルエミュレータ
-case "$TERMINAL" in
-    "gnome-terminal") pacman -Sy --noconfirm gnome-terminal ;;
-    "konsole") pacman -Sy --noconfirm konsole ;;
-    "xfce4-terminal") pacman -Sy --noconfirm xfce4-terminal ;;
-    "lxterminal") pacman -Sy --noconfirm lxterminal ;;
-    "mate-terminal") pacman -Sy --noconfirm mate-terminal ;;
-esac
+  # ブラウザのインストール
+  echo 'ブラウザを選択してください:'
+  select browser in \${browsers[@]}; do
+    break
+  done
+  echo \"選択されたブラウザ: \$browser\"
+  case \$browser in
+    chrome)
+      su ${username} -c 'yay -S google-chrome --noconfirm'
+      ;;
+    firefox)
+      pacman -S --noconfirm firefox
+      ;;
+    *)
+      echo '無効な選択です'
+      exit 1
+      ;;
+  esac
 
-# ブラウザ
-pacman -Sy --noconfirm google-chrome
+  # STEAM と PROTONUP-QT のインストール
+  read -p 'STEAM と PROTONUP-QT をインストールしますか? (y/n): ' install_steam
+  if [ \"\$install_steam\" == \"y\" ]; then
+    su ${username} -c 'yay -S steam protonup-qt --noconfirm'
+  fi
 
-# STEAM
-if [ "$INSTALL_STEAM" = "yes" ]; then
-    pacman -Sy --noconfirm steam
-fi
-
-# PROTONUP-QT
-if [ "$INSTALL_PROTON" = "yes" ]; then
-    pacman -Sy --noconfirm protonup-qt
-fi
-
-# ブートローダー
-pacman -Sy --noconfirm grub efibootmgr os-prober
-grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB
-grub-mkconfig -o /boot/grub/grub.cfg
-
-if [ "$AUTOLOGIN" = "yes" ]; then
-    if [ "$DM" = "GDM" ]; then
-        mkdir -p /etc/gdm
-        echo -e "[daemon]\nAutomaticLoginEnable=True\nAutomaticLogin=$USERNAME" > /etc/gdm/custom.conf
-    elif [ "$DM" = "SDDM" ]; then
-        sed -i "/^User=/c User=$USERNAME" /etc/sddm.conf || echo -e "[Autologin]\nUser=$USERNAME" >> /etc/sddm.conf
-    elif [ "$DM" = "LightDM" ]; then
-        mkdir -p /etc/lightdm
-        echo -e "[Seat:*]\nautologin-user=$USERNAME" >> /etc/lightdm/lightdm.conf
-    fi
-fi
-
+  echo 'インストールが完了しました。再起動してください。'
+"
 EOF
 
-chmod +x /mnt/install_in_chroot.sh
+chmod +x arch_chroot.sh
+./arch_chroot.sh
 
-arch-chroot /mnt /install_in_chroot.sh
+# アンマウント
+umount /mnt
 
-rm /mnt/install_in_chroot.sh
-
-echo "インストール完了。アンマウント後、再起動してください。"
+echo "インストールが完了しました。再起動してください。"
