@@ -1,131 +1,224 @@
 #!/bin/bash
-set -euo pipefail
 
-# --- 事前変数定義（必要に応じて編集） ---
-DISK="/dev/sda"
-HOST_NAME="archlinux"
-ROOT_PASSWORD="rootpass"
-USER_NAME="user"
-USER_PASSWORD="userpass"
-AUTO_LOGIN="yes"            # "yes"で自動ログイン
-CHROOT_PACKAGES_TO_INSTALL="xorg gnome gnome-extra gnome-keyring networkmanager"
-DM_SERVICE_NAME="gdm.service"
-INSTALL_STEAM="yes"
-INSTALL_PROTONUPQT="yes"
+# Arch Linux Automatic Installer Script
+# This script helps you install Arch Linux with interactive prompts.
 
-# --- パーティション作成・フォーマット ---
-echo "ディスクをパーティショニングし、フォーマットします..."
-sgdisk -Z ${DISK}
-sgdisk -n 1:0:+512M -t 1:ef00 ${DISK}
-sgdisk -n 2:0:0     -t 2:8300 ${DISK}
-mkfs.fat -F32 ${DISK}1
-mkfs.ext4 ${DISK}2
+set -e
 
-# --- マウント ---
-echo "パーティションをマウントします..."
-mount ${DISK}2 /mnt
-mkdir -p /mnt/boot
-mount ${DISK}1 /mnt/boot
+CONFIG_FILE="./arch_installer.conf"
 
-# --- ベースシステムインストール ---
-echo "ベースシステムをインストールします..."
-pacstrap /mnt base linux linux-firmware sudo vim
+echo "==== Arch Linux Auto Installer ===="
 
-# --- fstab生成 ---
+# Load config (if exists)
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+fi
+
+# 1. Disk Selection
+echo "Available disks:"
+lsblk -d -n -o NAME,SIZE,MODEL
+echo "Which disk do you want to install Arch Linux on? (e.g. sda, nvme0n1)"
+read -rp "Disk: " INSTALL_DISK
+
+INSTALL_DISK="/dev/$INSTALL_DISK"
+
+# 2. Swap Partition
+read -rp "Do you want to create a swap partition? (y/n): " CREATE_SWAP
+
+# 3. Basic Partitioning & Formatting
+echo "Partitioning disk $INSTALL_DISK..."
+sgdisk --zap-all "$INSTALL_DISK"
+sgdisk -n 1:0:+512M -t 1:ef00 "$INSTALL_DISK"    # EFI partition
+if [[ "$CREATE_SWAP" =~ ^[Yy]$ ]]; then
+    read -rp "Swap size (e.g. 4G): " SWAP_SIZE
+    sgdisk -n 2:0:+"$SWAP_SIZE" -t 2:8200 "$INSTALL_DISK" # Linux swap
+    sgdisk -n 3:0:0 -t 3:8300 "$INSTALL_DISK"             # Root
+    SWAP_PART="${INSTALL_DISK}2"
+    ROOT_PART="${INSTALL_DISK}3"
+else
+    sgdisk -n 2:0:0 -t 2:8300 "$INSTALL_DISK"             # Root
+    ROOT_PART="${INSTALL_DISK}2"
+fi
+EFI_PART="${INSTALL_DISK}1"
+
+echo "Formatting partitions..."
+mkfs.fat -F32 "$EFI_PART"
+mkfs.ext4 "$ROOT_PART"
+if [[ "$CREATE_SWAP" =~ ^[Yy]$ ]]; then
+    mkswap "$SWAP_PART"
+    swapon "$SWAP_PART"
+fi
+
+echo "Mounting partitions..."
+mount "$ROOT_PART" /mnt
+mkdir -p /mnt/boot/efi
+mount "$EFI_PART" /mnt/boot/efi
+
+# 4. Base System Install
+echo "Installing base system..."
+pacstrap /mnt base linux linux-firmware networkmanager sudo
+
+# 5. Generate fstab
 genfstab -U /mnt >> /mnt/etc/fstab
 
-# --- chroot内の設定をヒアドキュメントで実行 ---
-echo "chroot環境に入り、各種設定を行います..."
-arch-chroot /mnt /bin/bash <<EOF
-set -euo pipefail
+# 6. User Setup
+echo "Enter username for the new user:"
+read -rp "Username: " NEW_USER
+read -rsp "Password: " NEW_PASS; echo
 
-echo "パッケージキャッシュをクリアし、キーリングを更新します..."
-pacman -Scc --noconfirm
-pacman -Sy --noconfirm archlinux-keyring
+echo "Do you want to enable autologin for this user? (y/n): "
+read -r AUTOLOGIN
 
-echo "タイムゾーンとロケールを設定します..."
-ln -sf /usr/share/zoneinfo/Asia/Tokyo /etc/localtime
-hwclock --systohc
-echo "ja_JP.UTF-8 UTF-8" >> /etc/locale.gen
-echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
-locale-gen
-echo "LANG=ja_JP.UTF-8" > /etc/locale.conf
-echo "KEYMAP=jp106" > /etc/vconsole.conf
+# 7. Desktop Environment and Related Software
+echo "Choose your Desktop Environment:"
+DE=("GNOME" "KDE" "XFCE" "Cinnamon" "MATE")
+select DESKTOP in "${DE[@]}"; do
+    [[ -n $DESKTOP ]] && break
+done
 
-echo "ホスト名とhostsを設定します..."
-echo "${HOST_NAME}" > /etc/hostname
-cat <<HOSTS_EOF > /etc/hosts
-127.0.0.1 localhost
-::1       localhost
-127.0.1.1 ${HOST_NAME}.localdomain ${HOST_NAME}
-HOSTS_EOF
+echo "Choose your Display Manager:"
+DM=("gdm" "sddm" "lightdm" "lxdm" "none")
+select DISPLAY_MANAGER in "${DM[@]}"; do
+    [[ -n $DISPLAY_MANAGER ]] && break
+done
 
-echo "rootパスワードを設定..."
-echo "root:${ROOT_PASSWORD}" | chpasswd
+echo "Choose your Terminal Emulator:"
+TE=("gnome-terminal" "konsole" "xfce4-terminal" "kitty" "alacritty")
+select TERMINAL in "${TE[@]}"; do
+    [[ -n $TERMINAL ]] && break
+done
 
-echo "ユーザー作成とパスワード設定..."
-useradd -m -G wheel -s /bin/bash "${USER_NAME}"
-echo "${USER_NAME}:${USER_PASSWORD}" | chpasswd
+echo "Choose your Login Environment:"
+LE=("default" "Wayland" "Xorg" "console" "none")
+select LOGIN_ENV in "${LE[@]}"; do
+    [[ -n $LOGIN_ENV ]] && break
+done
 
-echo "wheelグループのsudo権限を有効化..."
-sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
+# 8. Browser and Others
+echo "Google Chrome will be installed by default."
+echo "Do you want to install Steam? (y/n): "
+read -r INSTALL_STEAM
+echo "Do you want to install ProtonUp-Qt? (y/n): "
+read -r INSTALL_PROTONUP
 
-if [ "${AUTO_LOGIN}" == "yes" ]; then
-  echo "自動ログイン設定..."
-  mkdir -p /etc/systemd/system/getty@tty1.service.d
-  cat <<AUTOLOGIN_CONF_EOF > /etc/systemd/system/getty@tty1.service.d/override.conf
-[Service]
-ExecStart=
-ExecStart=-/usr/bin/agetty --autologin ${USER_NAME} --noclear %I \$TERM
-AUTOLOGIN_CONF_EOF
-  systemctl enable getty@tty1.service
-fi
-
-echo "ネットワークサービス有効化..."
-systemctl enable NetworkManager
-systemctl enable dhcpcd
-
-echo "GRUBインストール..."
-grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=ARCH --recheck
-grub-mkconfig -o /boot/grub/grub.cfg
-
-if [ -n "${CHROOT_PACKAGES_TO_INSTALL}" ]; then
-  echo "デスクトップ環境など追加パッケージをインストール..."
-  pacman -S --noconfirm --needed ${CHROOT_PACKAGES_TO_INSTALL}
-fi
-
-if [ -n "${DM_SERVICE_NAME}" ]; then
-  echo "ディスプレイマネージャ有効化..."
-  systemctl enable ${DM_SERVICE_NAME}
-fi
-
-echo "AURヘルパー yay をインストール..."
-pacman -S --noconfirm --needed go git
-cd /tmp
-sudo -u "${USER_NAME}" bash -c 'git clone https://aur.archlinux.org/yay-bin.git || git clone https://aur.archlinux.org/yay.git && cd yay* && makepkg -si --noconfirm && cd .. && rm -rf yay*'
-
-echo "Google Chrome をインストール..."
-sudo -u "${USER_NAME}" yay -S --noconfirm google-chrome
-
-if [ "${INSTALL_STEAM}" == "yes" ]; then
-  echo "Steamをインストール..."
-  sed -i "/\\[multilib\\]/,/Include/"'s/^#//' /etc/pacman.conf
-  pacman -Sy --noconfirm
-  pacman -S --noconfirm steam
-fi
-
-if [ "${INSTALL_PROTONUPQT}" == "yes" ]; then
-  echo "ProtonUp-QTをFlatpak経由でインストール..."
-  pacman -S --noconfirm --needed flatpak
-  sudo -u "${USER_NAME}" flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-  sudo -u "${USER_NAME}" flatpak install -y --noninteractive flathub com.davidotek.protonup-qt
-fi
-
-echo "chroot内の処理が完了しました。"
+# 9. Save config for chroot
+cat << EOF > /mnt/arch_installer.conf
+NEW_USER="$NEW_USER"
+NEW_PASS="$NEW_PASS"
+AUTOLOGIN="$AUTOLOGIN"
+DESKTOP="$DESKTOP"
+DISPLAY_MANAGER="$DISPLAY_MANAGER"
+TERMINAL="$TERMINAL"
+LOGIN_ENV="$LOGIN_ENV"
+INSTALL_STEAM="$INSTALL_STEAM"
+INSTALL_PROTONUP="$INSTALL_PROTONUP"
 EOF
 
-# --- 完了メッセージ ---
-echo "インストール完了！"
-echo "次の手順:"
-echo "1. umount -R /mnt"
-echo "2. reboot"
+# 10. Copy post-install script into chroot
+cat << 'EOS' > /mnt/post_install.sh
+#!/bin/bash
+set -e
+
+source /arch_installer.conf
+
+# Set timezone and locales
+ln -sf /usr/share/zoneinfo/Asia/Tokyo /etc/localtime
+hwclock --systohc
+sed -i '/^#en_US.UTF-8/s/^#//' /etc/locale.gen
+locale-gen
+echo "LANG=en_US.UTF-8" > /etc/locale.conf
+echo "archlinux" > /etc/hostname
+
+# Setup hosts
+cat << HO > /etc/hosts
+127.0.0.1   localhost
+::1         localhost
+127.0.1.1   archlinux.localdomain archlinux
+HO
+
+# Set root password to blank (user must change later)
+echo "root:" | chpasswd
+
+# Create user
+useradd -m -G wheel "$NEW_USER"
+echo "$NEW_USER:$NEW_PASS" | chpasswd
+sed -i '/^# %wheel ALL=(ALL:ALL) ALL/s/^# //' /etc/sudoers
+
+# Enable network
+systemctl enable NetworkManager
+
+# Install microcode
+if grep -q GenuineIntel /proc/cpuinfo; then
+    pacman -S --noconfirm intel-ucode
+else
+    pacman -S --noconfirm amd-ucode
+fi
+
+# Install desktop environment and display manager
+case "$DESKTOP" in
+    GNOME)
+        pacman -S --noconfirm gnome gnome-tweaks
+        ;;
+    KDE)
+        pacman -S --noconfirm plasma kde-applications
+        ;;
+    XFCE)
+        pacman -S --noconfirm xfce4 xfce4-goodies
+        ;;
+    Cinnamon)
+        pacman -S --noconfirm cinnamon
+        ;;
+    MATE)
+        pacman -S --noconfirm mate mate-extra
+        ;;
+esac
+
+case "$DISPLAY_MANAGER" in
+    gdm)   pacman -S --noconfirm gdm; systemctl enable gdm ;;
+    sddm)  pacman -S --noconfirm sddm; systemctl enable sddm ;;
+    lightdm) pacman -S --noconfirm lightdm lightdm-gtk-greeter; systemctl enable lightdm ;;
+    lxdm)  pacman -S --noconfirm lxdm; systemctl enable lxdm ;;
+esac
+
+# Terminal emulator
+pacman -S --noconfirm "$TERMINAL"
+
+# Install Chrome
+pacman -S --noconfirm --needed base-devel
+if ! grep -q '\[chaotic-aur\]' /etc/pacman.conf; then
+    pacman-key --recv-key 3056513887B78AEB --keyserver keyserver.ubuntu.com
+    pacman-key --lsign-key 3056513887B78AEB
+    echo -e '[chaotic-aur]\nInclude = /etc/pacman.d/chaotic-mirrorlist' >> /etc/pacman.conf
+    pacman -Syu --noconfirm
+fi
+pacman -S --noconfirm google-chrome
+
+# Steam
+if [[ "$INSTALL_STEAM" =~ ^[Yy]$ ]]; then
+    pacman -S --noconfirm steam
+fi
+
+# ProtonUp-Qt
+if [[ "$INSTALL_PROTONUP" =~ ^[Yy]$ ]]; then
+    pacman -S --noconfirm protonup-qt
+fi
+
+# Autologin
+if [[ "$AUTOLOGIN" =~ ^[Yy]$ ]] && [[ "$DISPLAY_MANAGER" == "gdm" ]]; then
+    mkdir -p /etc/gdm
+    echo -e "[daemon]\nAutomaticLoginEnable=True\nAutomaticLogin=$NEW_USER" >> /etc/gdm/custom.conf
+fi
+
+if [[ "$AUTOLOGIN" =~ ^[Yy]$ ]] && [[ "$DISPLAY_MANAGER" == "sddm" ]]; then
+    mkdir -p /etc/sddm.conf.d
+    echo -e "[Autologin]\nUser=$NEW_USER" > /etc/sddm.conf.d/autologin.conf
+fi
+
+echo "Installation complete! Please reboot."
+EOS
+
+chmod +x /mnt/post_install.sh
+
+arch-chroot /mnt /post_install.sh
+
+echo "Arch Linux installation is complete! You can now reboot."
