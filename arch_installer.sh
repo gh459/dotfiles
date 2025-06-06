@@ -109,26 +109,26 @@ pacstrap /mnt base linux linux-firmware networkmanager sudo
 genfstab -U /mnt >> /mnt/etc/fstab
 
 # ユーザー名・パスワード
-read -rp "新しいユーザー名: " USERNAME
-read -rsp "パスワード: " PASSWORD
+read -rp "new username: " USERNAME
+read -rsp "password: " PASSWORD
 echo
 
 # 自動ログイン
-if ask_confirm "自動ログインを有効にしますか？"; then
+if ask_confirm "Enable automatic login?？"; then
     AUTOLOGIN="yes"
 else
     AUTOLOGIN="no"
 fi
 
 # デスクトップ環境, ログインマネージャ, ターミナルエミュレータ選択
-DESKTOP=$(ask_choice "デスクトップ環境を選択してください" "gnome" "kde" "xfce" "lxqt" "cinnamon")
-LOGIN_MANAGER=$(ask_choice "ログインマネージャを選択してください" "gdm" "sddm" "lightdm" "lxdm" "none")
-TERMINAL=$(ask_choice "ターミナルエミュレータを選択してください" "gnome-terminal" "konsole" "xfce4-terminal" "lxterminal" "tilix")
+DESKTOP=$(ask_choice "Please select your desktop environment." "gnome" "kde" "xfce" "lxqt" "cinnamon")
+LOGIN_MANAGER=$(ask_choice "Please select a login manager." "gdm" "sddm" "lightdm" "lxdm" "none")
+TERMINAL=$(ask_choice "Please select a terminal emulator." "gnome-terminal" "konsole" "xfce4-terminal" "lxterminal" "tilix")
 
 # Chromeインストール固定
 # Steam, ProtonUP-QT
-INSTALL_STEAM=$(ask_confirm "Steamをインストールしますか？" && echo "yes" || echo "no")
-INSTALL_PROTONUP=$(ask_confirm "ProtonUP-QTをインストールしますか？" && echo "yes" || echo "no")
+INSTALL_STEAM=$(ask_confirm "Install Steam?？" && echo "yes" || echo "no")
+INSTALL_PROTONUP=$(ask_confirm "Install ProtonUP-QT?？" && echo "yes" || echo "no")
 
 # confファイル書き出し
 write_config
