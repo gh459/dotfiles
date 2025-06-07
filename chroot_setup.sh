@@ -1,148 +1,167 @@
 #!/bin/bash
-# This script is executed inside the chroot environment.
+# chroot_setup.sh - System Configuration Script (run inside chroot)
 
-set -e # Exit immediately if a command exits with a non-zero status.
+# Exit on any error
+set -e
 
-# --- Helper Functions ---
-print_info() {
-    echo -e "\e[34m[INFO]\e[0m $1"
-}
+# --- Timezone and Locale ---
+echo "Setting timezone to Asia/Tokyo"
+ln -sf /usr/share/zoneinfo/Asia/Tokyo /etc/localtime
+hwclock --systohc
 
-# --- System Configuration ---
-print_info "Setting timezone to Asia/Tokyo..."
-ln -sf /usr/share/zoneinfo/Asia/Tokyo /etc/localtime[2]
-hwclock --systohc[2]
+echo "Generating locales (ja_JP.UTF-8 and en_US.UTF-8)"[13]
+sed -i 's/^#ja_JP.UTF-8 UTF-8/ja_JP.UTF-8 UTF-8/' /etc/locale.gen
+sed -i 's/^#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
+locale-gen
 
-print_info "Setting locale..."
-sed -i '/^#ja_JP.UTF-8/s/^#//' /etc/locale.gen
-sed -i '/^#en_US.UTF-8/s/^#//' /etc/locale.gen
-locale-gen[2]
-echo "LANG=ja_JP.UTF-8" > /etc/locale.conf[7]
-echo "KEYMAP=jp106" > /etc/vconsole.conf[2]
+echo "LANG=ja_JP.UTF-8" > /etc/locale.conf
+echo "KEYMAP=jp106" > /etc/vconsole.conf
 
-print_info "Setting hostname..."
-# Note: Variables like $HOSTNAME are passed from the parent install.sh script.
-echo "$HOSTNAME" > /etc/hostname
-cat <<HOSTS > /etc/hosts
+# --- Hostname and Network ---
+read -p "Enter your hostname: " HOSTNAME
+echo "${HOSTNAME}" > /etc/hostname
+cat <<EOF > /etc/hosts
 127.0.0.1   localhost
 ::1         localhost
-127.0.1.1   $HOSTNAME.localdomain $HOSTNAME
-HOSTS
+127.0.1.1   ${HOSTNAME}.localdomain ${HOSTNAME}
+EOF
 
-print_info "Setting passwords..."
-echo "root:$ROOT_PASSWORD" | chpasswd
-useradd -m -G wheel "$USERNAME"
-echo "$USERNAME:$USER_PASSWORD" | chpasswd
-# Allow users in the wheel group to use sudo
-sed -i '/^# %wheel ALL=(ALL:ALL) ALL/s/^# //' /etc/sudoers[2]
+# --- User Setup ---
+echo "Set the root password:"
+passwd
 
-print_info "Configuring pacman..."
-# Enable multilib repository for 32-bit support (e.g., for Steam)
-sed -i "/\[multilib\]/,/Include/"'s/^#//' /etc/pacman.conf
-pacman -Syyu --noconfirm
+read -p "Enter your username: " USERNAME
+useradd -m -G wheel "${USERNAME}"
+echo "Set password for ${USERNAME}:"
+passwd "${USERNAME}"
+
+echo "Configuring sudo for 'wheel' group"
+sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
 
 # --- Bootloader ---
-print_info "Installing GRUB bootloader..."
+echo "Installing GRUB bootloader for UEFI"
 pacman -S --noconfirm grub efibootmgr
-grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=ARCH[2]
-grub-mkconfig -o /boot/grub/grub.cfg[2][10]
+grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=ARCH
+grub-mkconfig -o /boot/grub/grub.cfg
 
-# --- Graphics and Desktop Environment ---
-print_info "Installing Xorg and basic drivers..."
-pacman -S --noconfirm xorg-server[6]
+# --- Enable Services ---
+echo "Enabling NetworkManager"
+systemctl enable NetworkManager
 
-print_info "Installing GPU drivers for $GPU_CHOICE..."
-case "$GPU_CHOICE" in
-    "NVIDIA") pacman -S --noconfirm nvidia-dkms nvidia-utils ;;
-    "AMD") pacman -S --noconfirm mesa lib32-mesa xf86-video-amdgpu ;;
-    "Intel") pacman -S --noconfirm mesa lib32-mesa xf86-video-intel ;;
-esac
+# --- Japanese Fonts and Input Method ---
+echo "Installing Japanese fonts and Fcitx5-Mozc"[4]
+pacman -S --noconfirm noto-fonts-cjk fcitx5-mozc fcitx5-im fcitx5-configtool
+cat <<EOT >> /etc/environment
+GTK_IM_MODULE=fcitx
+QT_IM_MODULE=fcitx
+XMODIFIERS=@im=fcitx
+EOT
 
-print_info "Installing Desktop Environment: $DE_CHOICE..."
-DM="" # Display Manager variable
-case "$DE_CHOICE" in
-    "GNOME")
-        pacman -S --noconfirm gnome gnome-terminal
-        DM="gdm"
-        ;;
-    "KDE-Plasma")
-        pacman -S --noconfirm plasma-meta konsole dolphin
-        DM="sddm"
-        ;;
-    "XFCE")
-        pacman -S --noconfirm xfce4 xfce4-goodies lightdm lightdm-gtk-greeter xfce4-terminal
-        DM="lightdm"
-        ;;
-    "Cinnamon")
-        pacman -S --noconfirm cinnamon lightdm lightdm-gtk-greeter gnome-terminal
-        DM="lightdm"
-        ;;
-    "Hyprland")
-        pacman -S --noconfirm hyprland kitty dolphin sddm xdg-desktop-portal-hyprland
-        DM="sddm"
-        ;;
-esac
+# --- Graphics Drivers ---
+echo "Detecting graphics card..."
+GPU_VENDOR=$(lspci | grep -E "VGA|3D" | grep -o -E "NVIDIA|AMD|Intel|VMware")
+DRIVER_PACKAGES=""
+if [[ "$GPU_VENDOR" == "NVIDIA" ]]; then
+    DRIVER_PACKAGES="nvidia nvidia-utils lib32-nvidia-utils"
+elif [[ "$GPU_VENDOR" == "AMD" ]]; then
+    DRIVER_PACKAGES="xf86-video-amdgpu vulkan-radeon lib32-vulkan-radeon"
+elif [[ "$GPU_VENDOR" == "Intel" ]]; then
+    DRIVER_PACKAGES="xf86-video-intel vulkan-intel lib32-vulkan-intel"
+elif [[ "$GPU_VENDOR" == "VMware" ]]; then
+    DRIVER_PACKAGES="xf86-video-vmware"
+fi
 
-# --- Japanese Language Support ---
-print_info "Installing Japanese fonts and input method..."
-pacman -S --noconfirm adobe-source-han-sans-jp-fonts noto-fonts-cjk fcitx5-im fcitx5-mozc[8]
-# Set environment variables for the input method
-cat <<ENV > /etc/environment
-GTK_IM_MODULE=fcitx5
-QT_IM_MODULE=fcitx5
-XMODIFIERS=@im=fcitx5
-ENV
-
-# --- Display Manager and Autologin ---
-if [ -n "$DM" ]; then
-    print_info "Enabling Display Manager: $DM..."
-    systemctl enable $DM
-
-    if [[ "$AUTOLOGIN" == "y" || "$AUTOLOGIN" == "Y" ]]; then
-        print_info "Configuring autologin for $USERNAME..."
-        case "$DM" in
-            "gdm")
-                sed -i "/^#.*AutomaticLoginEnable/s/^# //" /etc/gdm/custom.conf
-                sed -i "/^#.*AutomaticLogin/s/^# //" /etc/gdm/custom.conf
-                sed -i "s/user1/$USERNAME/" /etc/gdm/custom.conf
-                ;;
-            "lightdm")
-                sed -i "s/^#autologin-user=.*/autologin-user=$USERNAME/" /etc/lightdm/lightdm.conf
-                sed -i "s/^#autologin-session=.*/autologin-session=/" /etc/lightdm/lightdm.conf
-                ;;
-            "sddm")
-                mkdir -p /etc/sddm.conf.d
-                SESSION_DESKTOP="plasma.desktop" # Default to plasma
-                if [ "$DE_CHOICE" == "Hyprland" ]; then
-                    SESSION_DESKTOP="hyprland.desktop"
-                elif [ "$DE_CHOICE" == "XFCE" ]; then
-                    SESSION_DESKTOP="xfce.desktop"
-                elif [ "$DE_CHOICE" == "Cinnamon" ]; then
-                    SESSION_DESKTOP="cinnamon.desktop"
-                fi
-                echo -e "[Autologin]\nUser=$USERNAME\nSession=$SESSION_DESKTOP" > /etc/sddm.conf.d/autologin.conf
-                ;;
-        esac
+if [ -n "$DRIVER_PACKAGES" ]; then
+    echo "Detected GPU: $GPU_VENDOR"
+    read -p "Install graphics drivers ($DRIVER_PACKAGES)? (Y/n): " INSTALL_GPU
+    if [[ ! "$INSTALL_GPU" =~ ^[nN]$ ]]; then
+        pacman -S --noconfirm $DRIVER_PACKAGES
     fi
 fi
 
-# --- Install yay AUR Helper ---
-print_info "Setting up yay installation..."
-# Run the installation as the new user to avoid permission issues in the home directory
-runuser -l $USERNAME -c 'git clone https://aur.archlinux.org/yay.git && cd yay && makepkg -si --noconfirm && cd .. && rm -rf yay'
+# --- GUI Environment Selection ---
+echo "------------------------------------------------"
+echo "Select a Desktop Environment:"
+echo "1) KDE Plasma"
+echo "2) GNOME"
+echo "3) XFCE4"
+echo "4) Cinnamon"
+echo "5) Hyprland (Tiling Window Manager)"
+echo "------------------------------------------------"
+read -p "Enter your choice [1-5]: " DE_CHOICE
 
-# --- Install Additional Software ---
-print_info "Installing additional software..."
-runuser -l $USERNAME -c 'yay -S --noconfirm google-chrome'
+DE_PACKAGES=""
+DM_PACKAGE=""
+DM_SERVICE=""
 
-if [[ "$INSTALL_STEAM" == "y" || "$INSTALL_STEAM" == "Y" ]]; then
-    print_info "Installing Steam and ProtonUp-Qt..."
-    pacman -S --noconfirm steam
-    runuser -l $USERNAME -c 'yay -S --noconfirm protonup-qt'
+case $DE_CHOICE in
+    1) DE_PACKAGES="plasma-meta konsole"; DM_PACKAGE="sddm"; DM_SERVICE="sddm.service" ;;
+    2) DE_PACKAGES="gnome gnome-terminal"; DM_PACKAGE="gdm"; DM_SERVICE="gdm.service" ;;
+    3) DE_PACKAGES="xfce4 xfce4-goodies"; DM_PACKAGE="lightdm lightdm-gtk-greeter"; DM_SERVICE="lightdm.service" ;;
+    4) DE_PACKAGES="cinnamon"; DM_PACKAGE="lightdm lightdm-gtk-greeter"; DM_SERVICE="lightdm.service" ;;
+    5) DE_PACKAGES="hyprland kitty polkit-kde-agent"; DM_PACKAGE=""; DM_SERVICE="" ;;
+    *) echo "Invalid choice. Exiting."; exit 1 ;;
+esac
+
+echo "Installing selected environment..."
+pacman -S --noconfirm $DE_PACKAGES $DM_PACKAGE
+if [ -n "$DM_SERVICE" ]; then
+    systemctl enable $DM_SERVICE
 fi
 
-print_info "Cleaning up..."
-# Remove this script after execution
+# --- Autologin Setup ---
+read -p "Enable autologin for ${USERNAME}? (y/N): " AUTOLOGIN_CHOICE
+if [[ "$AUTOLOGIN_CHOICE" =~ ^[yY]$ ]]; then
+    echo "Configuring autologin..."
+    case $DE_CHOICE in
+        1) # SDDM
+            mkdir -p /etc/sddm.conf.d
+            echo -e "[Autologin]\nUser=${USERNAME}\nSession=plasma.desktop" > /etc/sddm.conf.d/autologin.conf
+            ;;
+        2) # GDM
+            sed -i "/\[daemon\]/a AutomaticLoginEnable=True\nAutomaticLogin=${USERNAME}" /etc/gdm/custom.conf
+            ;;
+        3|4) # LightDM[6]
+            sed -i "s/^#autologin-user=.*/autologin-user=${USERNAME}/" /etc/lightdm/lightdm.conf
+            groupadd -r autologin
+            gpasswd -a "${USERNAME}" autologin
+            ;;
+        5) # Hyprland (TTY Autologin)[2]
+            mkdir -p "/etc/systemd/system/getty@tty1.service.d"
+            cat > "/etc/systemd/system/getty@tty1.service.d/override.conf" <<EOF
+[Service]
+ExecStart=
+ExecStart=-/usr/bin/agetty --autologin ${USERNAME} --noclear %I \$TERM
+EOF
+            echo -e '\nif [ -z "$DISPLAY" ] && [ "$(fgconsole)" -eq 1 ]; then\n  exec Hyprland\nfi' >> "/home/${USERNAME}/.bash_profile"
+            ;;
+    esac
+fi
+
+# --- AUR Helper (yay) ---
+echo "Installing AUR helper (yay)..."
+sudo -u "${USERNAME}" bash -c "cd /tmp && git clone https://aur.archlinux.org/yay-bin.git && cd yay-bin && makepkg -si --noconfirm"
+
+# --- Additional Software ---
+echo "Installing Google Chrome..."[9]
+sudo -u "${USERNAME}" yay -S --noconfirm google-chrome
+
+read -p "Install Steam and ProtonUp-QT? (y/N): " INSTALL_GAMING
+if [[ "$INSTALL_GAMING" =~ ^[yY]$ ]]; then
+    echo "Enabling multilib repository for Steam..."[3]
+    sed -i "/\[multilib\]/,/Include/"'s/^#//' /etc/pacman.conf
+    pacman -Sy --noconfirm
+    echo "Installing Steam..."
+    pacman -S --noconfirm steam
+    echo "Installing ProtonUp-QT..."[7]
+    sudo -u "${USERNAME}" yay -S --noconfirm protonup-qt
+fi
+
+# --- Cleanup ---
 rm /chroot_setup.sh
 
-print_info "Chroot setup complete. Type 'exit' or press Ctrl+D to leave chroot."
+echo "------------------------------------------------"
+echo "Chroot setup is complete."
+echo "You can now exit chroot by typing 'exit'."
+echo "------------------------------------------------"
+
