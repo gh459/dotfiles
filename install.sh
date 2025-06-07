@@ -1,110 +1,120 @@
 #!/bin/bash
-# install.sh - Arch Linux Base Installation Script
 
 # Exit on any error
 set -e
 
-# --- Initial Setup ---
-echo "Setting Japanese keyboard layout"
+echo ">>> Setting up Japanese keyboard layout"
 loadkeys jp106
 
-echo "Verifying boot mode"
-if [ ! -d /sys/firmware/efi/efivars ]; then
-    echo "ERROR: Not booted in UEFI mode. This script is for UEFI systems only."
-    exit 1
-fi
-
-echo "Updating system clock"
+echo ">>> Updating system clock"
 timedatectl set-ntp true
 
-# --- Disk Partitioning ---
-echo "------------------------------------------------"
-echo "Available disks:"
+echo ">>> Listing available disks"
 lsblk -d -o NAME,SIZE,MODEL
-echo "------------------------------------------------"
+echo ">>> Please enter the disk to install Arch Linux on (e.g., sda, nvme0n1):"
+read -r INSTALL_DRIVE
+INSTALL_DRIVE="/dev/${INSTALL_DRIVE}"
 
-read -p "Enter the disk to install Arch Linux on (e.g., /dev/sda): " TARGET_DISK
-
-if ! lsblk -d -o NAME | grep -q "$(basename "$TARGET_DISK")"; then
-    echo "ERROR: Disk $TARGET_DISK not found."
+if ! [ -b "$INSTALL_DRIVE" ]; then
+    echo "!!! ERROR: Disk ${INSTALL_DRIVE} not found."
     exit 1
 fi
 
-read -p "THIS WILL WIPE ALL DATA ON ${TARGET_DISK}. Are you sure? (y/N): " CONFIRM_WIPE
-if [[ ! "$CONFIRM_WIPE" =~ ^[yY]$ ]]; then
-    echo "Aborting."
-    exit 1
+echo ">>> WARNING: This will format ${INSTALL_DRIVE}. All data will be lost."
+echo ">>> Do you want to continue? (y/N)"
+read -r CONFIRM
+if [ "$CONFIRM" != "y" ]; then
+    echo "!!! Installation aborted."
+    exit 0
 fi
 
-read -p "Create a swap partition? (y/N): " CREATE_SWAP
-SWAP_SIZE_GB=0
-if [[ "$CREATE_SWAP" =~ ^[yY]$ ]]; then
-    read -p "Enter swap size in GB (e.g., 8): " SWAP_SIZE_GB
-fi
+echo ">>> Do you want to create a swap partition? (y/N)"
+read -r SWAP_CHOICE
+SWAP_SIZE="8G" # You can change the swap size here
 
-echo "Partitioning ${TARGET_DISK}..."
-parted -s "${TARGET_DISK}" \
-    mklabel gpt \
-    mkpart ESP fat32 1MiB 513MiB \
-    set 1 esp on
+echo ">>> Please enter a username:"
+read -r USER_NAME
 
-if [[ "$CREATE_SWAP" =~ ^[yY]$ ]]; then
-    parted -s "${TARGET_DISK}" \
-        mkpart primary linux-swap 513MiB $((513 + SWAP_SIZE_GB * 1024))MiB \
-        mkpart primary ext4 $((513 + SWAP_SIZE_GB * 1024))MiB 100%
+echo ">>> Please enter a password for the user ${USER_NAME}:"
+read -s -r USER_PASSWORD
+
+echo ">>> Do you want to enable autologin? (y/N)"
+read -r AUTOLOGIN_CHOICE
+
+echo ">>> Select a Desktop Environment:"
+echo "1) GNOME"
+echo "2) KDE Plasma"
+echo "3) XFCE4"
+echo "4) Cinnamon"
+echo "5) MATE"
+read -r DE_CHOICE
+
+echo ">>> Do you want to install Steam and ProtonUp-Qt? (y/N)"
+read -r STEAM_CHOICE
+
+# Partitioning the disk
+echo ">>> Partitioning ${INSTALL_DRIVE}"
+sgdisk --zap-all "${INSTALL_DRIVE}"
+sgdisk -n 1:0:+512M -t 1:ef00 "${INSTALL_DRIVE}" # EFI Partition
+
+if [ "$SWAP_CHOICE" = "y" ]; then
+    sgdisk -n 2:0:+"${SWAP_SIZE}" -t 2:8200 "${INSTALL_DRIVE}" # Swap Partition
+    sgdisk -n 3:0:0 -t 3:8300 "${INSTALL_DRIVE}" # Root Partition
+    ROOT_PARTITION="${INSTALL_DRIVE}p3"
+    SWAP_PARTITION="${INSTALL_DRIVE}p2"
 else
-    parted -s "${TARGET_DISK}" \
-        mkpart primary ext4 513MiB 100%
+    sgdisk -n 2:0:0 -t 2:8300 "${INSTALL_DRIVE}" # Root Partition
+    ROOT_PARTITION="${INSTALL_DRIVE}p2"
 fi
+EFI_PARTITION="${INSTALL_DRIVE}p1"
 
-# Determine partition names
-EFI_PARTITION="${TARGET_DISK}1"
-if [[ "$CREATE_SWAP" =~ ^[yY]$ ]]; then
-    SWAP_PARTITION="${TARGET_DISK}2"
-    ROOT_PARTITION="${TARGET_DISK}3"
-else
-    ROOT_PARTITION="${TARGET_DISK}2"
-fi
-
-# --- Formatting Partitions ---
-echo "Formatting partitions..."
+# Formatting the partitions
+echo ">>> Formatting partitions"
 mkfs.fat -F32 "${EFI_PARTITION}"
 mkfs.ext4 "${ROOT_PARTITION}"
-if [[ "$CREATE_SWAP" =~ ^[yY]$ ]]; then
+if [ "$SWAP_CHOICE" = "y" ]; then
     mkswap "${SWAP_PARTITION}"
-fi
-
-# --- Mounting File Systems ---
-echo "Mounting file systems..."
-mount "${ROOT_PARTITION}" /mnt
-mkdir -p /mnt/boot
-mount "${EFI_PARTITION}" /mnt/boot
-if [[ "$CREATE_SWAP" =~ ^[yY]$ ]]; then
     swapon "${SWAP_PARTITION}"
 fi
 
-# --- Installing Base System ---
-echo "Installing base system and essential packages..."
-pacstrap /mnt base linux linux-firmware base-devel git vim sudo networkmanager
+# Mounting the file systems
+echo ">>> Mounting file systems"
+mount "${ROOT_PARTITION}" /mnt
+mkdir -p /mnt/boot
+mount "${EFI_PARTITION}" /mnt/boot
 
-# --- Generating fstab ---
-echo "Generating fstab..."
+# Install essential packages
+echo ">>> Installing base system (pacstrap)"
+pacstrap /mnt base linux linux-firmware base-devel git vim networkmanager grub efibootmgr
+
+# Generate fstab
+echo ">>> Generating fstab"
 genfstab -U /mnt >> /mnt/etc/fstab
 
-# --- Chroot and Final Setup ---
-echo "Copying chroot script to new system..."
+# Create configuration file for chroot script
+echo ">>> Creating chroot configuration"
+cat <<EOF > /mnt/chroot_config.sh
+USER_NAME="${USER_NAME}"
+USER_PASSWORD="${USER_PASSWORD}"
+AUTOLOGIN_CHOICE="${AUTOLOGIN_CHOICE}"
+DE_CHOICE="${DE_CHOICE}"
+STEAM_CHOICE="${STEAM_CHOICE}"
+EOF
+
+# Copy chroot script and execute it
+echo ">>> Preparing for chroot"
 cp chroot_setup.sh /mnt/
 chmod +x /mnt/chroot_setup.sh
 
-echo "Entering chroot environment to continue setup..."
-arch-chroot /mnt /chroot_setup.sh
+echo ">>> Entering chroot and running setup script"
+arch-chroot /mnt /bin/bash /chroot_setup.sh
 
-# --- Finish ---
-echo "------------------------------------------------"
-echo "Installation complete."
-echo "Unmounting partitions..."
-umount -R /mnt
-swapoff -a
-echo "You can now safely reboot your system by typing 'reboot'."
-echo "------------------------------------------------"
+# Cleanup and finish
+echo ">>> Cleaning up"
+rm /mnt/chroot_setup.sh
+rm /mnt/chroot_config.sh
+
+echo ">>> Installation finished. You can now unmount and reboot."
+echo ">>> umount -R /mnt"
+echo ">>> reboot"
 
