@@ -1,142 +1,100 @@
-#!/bin/bash
-# install.sh - Arch Linux Base Installation Script
+#!/usr/bin/env bash
+# ------------------------------------------------------------
+# Arch Linux automated installer (run on archiso) – setup.sh
+# ------------------------------------------------------------
+set -euo pipefail
 
-# Stop on any error
-set -e
+echo "==> Gathering user input ..."
+read -rp "Hostname: " HOSTNAME
+read -rp "Username: " USERNAME
+read -rp "Target drive (e.g. /dev/nvme0n1): " DRIVE
+lsblk "$DRIVE"
+read -rp "Proceed and destroy ALL data on $DRIVE? [yes/NO]: " ANS
+[[ $ANS == yes ]] || { echo "Abort."; exit 1; }
 
-echo "============================================="
-echo " Arch Linux Installer Script"
-echo "============================================="
-echo "INFO: This script will erase all data on the selected disk."
-echo "INFO: Make sure you have a backup of your important data."
-echo "INFO: Please ensure you are connected to the internet."
-echo "============================================="
-
-# --- Get user inputs ---
-read -p "Enter username: " USERNAME
-read -s -p "Enter password for $USERNAME: " USER_PASSWORD
-echo
-read -p "Enter hostname: " HOSTNAME
-
-echo "Select your graphics card vendor:"
-select DRIVER in "NVIDIA" "AMD" "Intel" "None (or Virtual Machine)"; do
-    case $DRIVER in
-        "NVIDIA") GFX_PACKAGE="nvidia nvidia-utils"; break;;
-        "AMD") GFX_PACKAGE="xf86-video-amdgpu"; break;;
-        "Intel") GFX_PACKAGE="xf86-video-intel"; break;;
-        "None (or Virtual Machine)") GFX_PACKAGE="mesa"; break;;
-    esac
-done
-
-echo "Select your Desktop Environment:"
-select DE_CHOICE in "GNOME" "KDE Plasma" "XFCE" "Cinnamon" "MATE"; do
-    case $DE_CHOICE in
-        "GNOME") DE_PACKAGES="gnome gdm gnome-terminal"; DM="gdm"; break;;
-        "KDE Plasma") DE_PACKAGES="plasma-meta konsole sddm"; DM="sddm"; break;;
-        "XFCE") DE_PACKAGES="xfce4 xfce4-goodies lightdm lightdm-gtk-greeter xfce4-terminal"; DM="lightdm"; break;;
-        "Cinnamon") DE_PACKAGES="cinnamon lightdm lightdm-gtk-greeter gnome-terminal"; DM="lightdm"; break;;
-        "MATE") DE_PACKAGES="mate mate-extra lightdm lightdm-gtk-greeter mate-terminal"; DM="lightdm"; break;;
-    esac
-done
-
-read -p "Enable automatic login? (y/n): " AUTOLOGIN_CHOICE
-[[ "$AUTOLOGIN_CHOICE" =~ ^[Yy]$ ]] && AUTOLOGIN="yes" || AUTOLOGIN="no"
-
-read -p "Create a swap partition? (y/n): " SWAP_CHOICE
-if [[ "$SWAP_CHOICE" =~ ^[Yy]$ ]]; then
-    read -p "Enter swap size (e.g., 8G): " SWAP_SIZE
+read -rp "Create swap partition? [y/N]: " MAKE_SWAP
+if [[ $MAKE_SWAP =~ ^[yY]$ ]]; then
+  read -rp "Swap size (e.g. 4G): " SWAPSIZE
 fi
 
-read -p "Install Steam and ProtonUp-Qt? (y/n): " STEAM_CHOICE
-[[ "$STEAM_CHOICE" =~ ^[Yy]$ ]] && INSTALL_STEAM="yes" || INSTALL_STEAM="no"
+echo "GPU driver: 1) nvidia  2) amd  3) intel"
+read -rp "Select GPU [1-3]: " GPUSEL
 
+echo "Desktop Env: 1) GNOME 2) KDE 3) XFCE 4) Cinnamon 5) MATE"
+read -rp "Select DE [1-5]: " DESEL
 
-# --- Disk partitioning ---
-echo "INFO: Available disks:"
-lsblk -d -o NAME,SIZE
-read -p "Enter the disk to install on (e.g., /dev/sda): " INSTALL_DISK
+echo "Display Mgr: 1) GDM 2) SDDM 3) LightDM 4) LXDM 5) None"
+read -rp "Select DM [1-5]: " DMSEL
 
-echo "WARNING: This will delete all data on $INSTALL_DISK. Press Enter to continue, or Ctrl+C to cancel."
-read -r
+echo "Login Shell: 1) bash 2) zsh 3) fish 4) tcsh 5) nu"
+read -rp "Select shell [1-5]: " SHELSEL
 
-echo "INFO: Partitioning disk $INSTALL_DISK..."
-timedatectl set-ntp true
+echo "Terminal EMU: 1) gnome-terminal 2) konsole 3) xfce4-terminal 4) tilix 5) alacritty"
+read -rp "Select terminal [1-5]: " TERMSEL
 
-# Wipe disk and create partitions with sgdisk
-sgdisk --zap-all "$INSTALL_DISK"
-sgdisk -n 1:0:+512M -t 1:ef00 -c 1:EFI "$INSTALL_DISK" # EFI Partition
+read -rp "Enable autologin (graphical or tty) ? [y/N]: " AUTOLOGIN
+read -rp "Install Steam ? [y/N]: " WANT_STEAM
+read -rp "Install ProtonUp-Qt ? [y/N]: " WANT_PROTON
 
-if [[ "$SWAP_CHOICE" =~ ^[Yy]$ ]]; then
-    sgdisk -n 2:0:+"$SWAP_SIZE" -t 2:8200 -c 2:SWAP "$INSTALL_DISK" # Swap Partition
-    sgdisk -n 3:0:0 -t 3:8300 -c 3:ROOT "$INSTALL_DISK" # Root Partition
-    PART_EFI="${INSTALL_DISK}1"
-    PART_SWAP="${INSTALL_DISK}2"
-    PART_ROOT="${INSTALL_DISK}3"
+# ------------------------------------------------------------
+# Partitioning
+# ------------------------------------------------------------
+echo "==> Partitioning drive ..."
+sgdisk --zap-all "$DRIVE"
+parted -s "$DRIVE" mklabel gpt
+parted -s "$DRIVE" mkpart ESP fat32 1MiB 1025MiB
+parted -s "$DRIVE" set 1 esp on
+if [[ $MAKE_SWAP =~ ^[yY]$ ]]; then
+  parted -s "$DRIVE" mkpart primary linux-swap 1025MiB "$((1025 + $(numfmt --from=iec "$SWAPSIZE") / 1024 / 1024))"MiB
+  ROOT_START="$((1025 + $(numfmt --from=iec "$SWAPSIZE") / 1024 / 1024))"
 else
-    sgdisk -n 2:0:0 -t 2:8300 -c 2:ROOT "$INSTALL_DISK" # Root Partition
-    PART_EFI="${INSTALL_DISK}1"
-    PART_ROOT="${INSTALL_DISK}2"
+  ROOT_START=1025
 fi
+parted -s "$DRIVE" mkpart primary ext4 "${ROOT_START}MiB" 100%
 
-echo "INFO: Formatting partitions..."
-mkfs.fat -F32 "$PART_EFI"
-mkfs.ext4 "$PART_ROOT"
-if [[ "$SWAP_CHOICE" =~ ^[Yy]$ ]]; then
-    mkswap "$PART_SWAP"
-fi
+EFI="${DRIVE}1"
+if [[ $MAKE_SWAP =~ ^[yY]$ ]]; then SWAPP="${DRIVE}2"; ROOTP="${DRIVE}3"; else ROOTP="${DRIVE}2"; fi
 
-echo "INFO: Mounting filesystems..."
-mount "$PART_ROOT" /mnt
-mkdir -p /mnt/boot/efi
-mount "$PART_EFI" /mnt/boot/efi
-if [[ "$SWAP_CHOICE" =~ ^[Yy]$ ]]; then
-    swapon "$PART_SWAP"
-fi
+echo "==> Formatting ..."
+mkfs.fat -F32 "$EFI"
+mkfs.ext4 -F "$ROOTP"
+if [[ $MAKE_SWAP =~ ^[yY]$ ]]; then mkswap "$SWAPP"; swapon "$SWAPP"; fi
 
+echo "==> Mounting ..."
+mount "$ROOTP" /mnt
+mkdir -p /mnt/boot
+mount "$EFI" /mnt/boot
 
-# --- Base system installation ---
-echo "INFO: Installing base system (pacstrap)... This may take a while."
-pacstrap /mnt base base-devel linux linux-firmware git grub efibootmgr networkmanager
+# ------------------------------------------------------------
+# Base install
+# ------------------------------------------------------------
+echo "==> Installing base system ..."
+pacstrap -K /mnt base base-devel linux linux-firmware linux-headers networkmanager sudo vim \
+  git # base set[1][2]
 
-echo "INFO: Generating fstab..."
 genfstab -U /mnt >> /mnt/etc/fstab
 
-
-# --- Prepare chroot environment ---
-echo "INFO: Preparing chroot environment..."
-# Store variables for chroot script
-cat <<EOF > /mnt/install_vars.sh
-USERNAME="$USERNAME"
-USER_PASSWORD="$USER_PASSWORD"
-HOSTNAME="$HOSTNAME"
-GFX_PACKAGE="$GFX_PACKAGE"
-DE_PACKAGES="$DE_PACKAGES"
-DM="$DM"
-AUTOLOGIN="$AUTOLOGIN"
-INSTALL_STEAM="$INSTALL_STEAM"
+# ------------------------------------------------------------
+# Pass variables to chroot
+# ------------------------------------------------------------
+cat > /mnt/root/install.conf <<EOF
+HOSTNAME=$HOSTNAME
+USERNAME=$USERNAME
+GPUSEL=$GPUSEL
+DESEL=$DESEL
+DMSEL=$DMSEL
+SHELSEL=$SHELSEL
+TERMSEL=$TERMSEL
+AUTOLOGIN=$AUTOLOGIN
+WANT_STEAM=$WANT_STEAM
+WANT_PROTON=$WANT_PROTON
+MAKE_SWAP=$MAKE_SWAP
 EOF
 
-# Copy chroot script to new system
-cp chroot_setup.sh /mnt/
-chmod +x /mnt/chroot_setup.sh
+cp "$(dirname "$0")/chroot_setup.sh" /mnt/root/
+chmod +x /mnt/root/chroot_setup.sh
 
-echo "INFO: Entering chroot and running setup script..."
-arch-chroot /mnt /chroot_setup.sh
+echo "==> Entering chroot ..."
+arch-chroot /mnt /root/chroot_setup.sh
 
-
-# --- Finalization ---
-echo "INFO: Cleaning up..."
-rm /mnt/install_vars.sh
-rm /mnt/chroot_setup.sh
-
-echo "INFO: Unmounting partitions..."
-umount -R /mnt
-
-echo "============================================="
-echo " Installation Complete!"
-echo "============================================="
-echo "INFO: You can now reboot the system. Please remove the installation media."
-read -p "Reboot now? (y/n): " REBOOT_NOW
-if [[ "$REBOOT_NOW" =~ ^[Yy]$ ]]; then
-    reboot
-fi
+echo "==> Installation finished. You may reboot."
