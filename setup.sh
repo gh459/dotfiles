@@ -1,104 +1,62 @@
-#!/usr/bin/env bash
-# Arch Linux automated installer (host side)
-set -euo pipefail
+#!/bin/bash
 
-#----- helper ---------------------------------------------------------------
-pause() { read -rp ">>> $1 [Enter]"; }
-
-#----- sanity ---------------------------------------------------------------
-if [[ $EUID -ne 0 ]]; then
-  echo "This script must be run as root." >&2
-  exit 1
+# Ensure the script is run as root
+if [ "$EUID" -ne 0 ]; then
+  echo "Please run as root"
+  exit
 fi
 
-#----- collect basic information -------------------------------------------
-echo
-lsblk -dpno NAME,SIZE | grep -E "^/dev"
-read -rp ">>> Select target disk (e.g. /dev/sda): " DISK
+echo "Setting locale to Japanese..."
+sed -i 's/#ja_JP.UTF-8/ja_JP.UTF-8/' /etc/locale.gen
+locale-gen
+echo 'LANG=ja_JP.UTF-8' > /etc/locale.conf
+export LANG=ja_JP.UTF-8
 
-read -rp ">>> Create swap partition? (y/n) : " MAKE_SWAP
-if [[ $MAKE_SWAP == y ]]; then
-  read -rp ">>> Swap size in GiB (e.g. 4)   : " SWAPSIZE
-fi
+echo "Installing essential packages..."
+pacman -Sy --noconfirm base base-devel linux linux-firmware vim nano
 
-echo
-echo "GPU driver:"
-select GPU in nvidia amd intel; do
-  [[ -n $GPU ]] && break
-done
-
-echo
-read -rp ">>> Hostname                 : " HOSTNAME
-read -rp ">>> New username             : " USERNAME
-read -rsp ">>> Password (hidden)        : " PASSWORD; echo
-read -rsp ">>> Confirm  (hidden)        : " PASSWORD2; echo
-[[ "$PASSWORD" != "$PASSWORD2" ]] && { echo "Password mismatch"; exit 1; }
-
-read -rp ">>> Enable autologin? (y/n)  : " AUTOLOGIN
-
-echo
-echo "Desktop Environment:"
-select DE in gnome plasma xfce cinnamon mate; do
-  [[ -n $DE ]] && break
-done
-
-echo
-echo "Display Manager:"
-select DM in gdm sddm lightdm lxdm ly; do
-  [[ -n $DM ]] && break
-done
-
-echo
-echo "Terminal Emulator:"
-select TERMAPP in gnome-terminal konsole xfce4-terminal kitty alacritty; do
-  [[ -n $TERMAPP ]] && break
-done
-
-echo
-read -rp ">>> Install Steam? (y/n)     : " WANT_STEAM
-read -rp ">>> Install ProtonUp-QT? (y/n): " WANT_PROTON
-
-pause "All data on ${DISK} will be lost. Continue"
-
-#----- partitioning ---------------------------------------------------------
-echo "## Partitioning disk…"       # English comment
-parted -s "$DISK" mklabel gpt
-parted -s "$DISK" mkpart ESP fat32 1MiB 513MiB
-parted -s "$DISK" set 1 esp on
-
-START=513
-if [[ $MAKE_SWAP == y ]]; then
-  ENDSWAP=$((START + SWAPSIZE*1024))
-  parted -s "$DISK" mkpart swap linux-swap "${START}MiB" "${ENDSWAP}MiB"
-  parted -s "$DISK" set 2 swap on
-  ROOTSTART=$ENDSWAP
-  ROOTPART=3
+echo "Driver installation: Choose your GPU driver"
+echo "1) NVIDIA 2) AMD 3) Intel"
+read -r gpu_choice
+if [ "$gpu_choice" -eq 1 ]; then
+  pacman -Sy --noconfirm nvidia
+elif [ "$gpu_choice" -eq 2 ]; then
+  pacman -Sy --noconfirm xf86-video-amdgpu
+elif [ "$gpu_choice" -eq 3 ]; then
+  pacman -Sy --noconfirm xf86-video-intel
 else
-  ROOTSTART=$START
-  ROOTPART=2
+  echo "Invalid choice, skipping GPU driver installation."
 fi
-parted -s "$DISK" mkpart root ext4 "${ROOTSTART}MiB" 100%
 
-ESP="${DISK}1"
-ROOT="${DISK}${ROOTPART}"
-[[ $MAKE_SWAP == y ]] && SWAPP="${DISK}2"
+echo "Listing available disks..."
+lsblk
+echo "Enter the disk for installation (e.g., /dev/sda):"
+read -r disk
+echo "Create swap partition? (yes/no)"
+read -r swap_choice
+if [ "$swap_choice" == "yes" ]; then
+  swap_size="1G" # Default swap size
+  echo "Enter swap size (e.g., 1G, 2G):"
+  read -r swap_size
+  echo "Creating swap partition..."
+  parted "$disk" mkpart primary linux-swap 1MiB "$swap_size"
+  mkswap "${disk}1"
+  swapon "${disk}1"
+fi
+echo "Formatting and partitioning the disk..."
+parted "$disk" mklabel gpt
+parted "$disk" mkpart primary ext4 "$swap_size" 100%
+mkfs.ext4 "${disk}2"
+mount "${disk}2" /mnt
 
-echo "## Formatting…"               # English comment
-mkfs.fat -F32 "$ESP"
-mkfs.ext4 -F "$ROOT"
-[[ $MAKE_SWAP == y ]] && mkswap "$SWAPP"
+echo "Installing Arch Linux base system..."
+pacstrap /mnt base base-devel linux linux-firmware
 
-echo "## Mounting…"                 # English comment
-mount "$ROOT" /mnt
-mkdir -p /mnt/boot
-mount "$ESP" /mnt/boot
-[[ $MAKE_SWAP == y ]] && swapon "$SWAPP"
-
-#----- base system ----------------------------------------------------------
-echo "## Installing base system…"   # English comment
-pacstrap -K /mnt base linux linux-firmware sudo networkmanager base-devel git vim
-
+echo "Generating fstab..."
 genfstab -U /mnt >> /mnt/etc/fstab
 
-#----- pass variables to chroot --------------------------------------------
-install -Dm700 /dev/null /
+echo "Chrooting into the new system..."
+cp chroot_setup.sh /mnt/
+arch-chroot /mnt ./chroot_setup.sh
+
+echo "Setup completed successfully!"
