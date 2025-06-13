@@ -1,76 +1,66 @@
-#!/usr/bin/env bash
-# Arch Linux automated installer (chroot side)
-set -euo pipefail
+#!/bin/bash
 
-#----- load variables -------------------------------------------------------
-source /root/.autosetup
-rm /root/.autosetup
-
-#----- locale & time --------------------------------------------------------
-echo "## Configuring locale/time…" # English comment
-sed -i '/^#ja_JP.UTF-8/s/^#//' /etc/locale.gen
-locale-gen
-echo "LANG=ja_JP.UTF-8" > /etc/locale.conf
+echo "Setting timezone..."
 ln -sf /usr/share/zoneinfo/Asia/Tokyo /etc/localtime
 hwclock --systohc
-echo "KEYMAP=jp106" > /etc/vconsole.conf
 
-#----- hostname -------------------------------------------------------------
-echo "$HOSTNAME" > /etc/hostname
-cat >> /etc/hosts <<EOF
-127.0.0.1   localhost
-::1         localhost
-127.0.1.1   $HOSTNAME.localdomain $HOSTNAME
-EOF
+echo "Creating user and setting password..."
+echo "Enter username:"
+read -r username
+useradd -m "$username"
+echo "Enter password for $username:"
+passwd "$username"
 
-#----- users & sudo ---------------------------------------------------------
-echo "## Creating user…"           # English comment
-echo "root:$PASSWORD" | chpasswd
-useradd -m -G wheel -s /bin/bash "$USERNAME"
-echo "$USERNAME:$PASSWORD" | chpasswd
-sed -i '/^# %wheel ALL=(ALL) ALL/s/^# //' /etc/sudoers
+echo "Enable automatic login? (yes/no)"
+read -r auto_login
+if [ "$auto_login" == "yes" ]; then
+  mkdir -p /etc/systemd/system/getty@tty1.service.d
+  echo -e "[Service]\nExecStart=\nExecStart=-/usr/bin/agetty --autologin $username --noclear %I 38400 linux" > /etc/systemd/system/getty@tty1.service.d/autologin.conf
+fi
 
-#----- network --------------------------------------------------------------
-pacman -S --noconfirm networkmanager
-systemctl enable NetworkManager
+echo "Installing desktop environment and display manager..."
+echo "Choose a desktop environment:"
+echo "1) GNOME 2) KDE Plasma 3) XFCE 4) Cinnamon 5) LXQt"
+read -r de_choice
+if [ "$de_choice" -eq 1 ]; then
+  pacman -Sy --noconfirm gnome gdm
+elif [ "$de_choice" -eq 2 ]; then
+  pacman -Sy --noconfirm plasma sddm
+elif [ "$de_choice" -eq 3 ]; then
+  pacman -Sy --noconfirm xfce4 lightdm
+elif [ "$de_choice" -eq 4 ]; then
+  pacman -Sy --noconfirm cinnamon lightdm
+elif [ "$de_choice" -eq 5 ]; then
+  pacman -Sy --noconfirm lxqt lightdm
+else
+  echo "Invalid choice, skipping desktop environment installation."
+fi
 
-#----- gpu driver -----------------------------------------------------------
-case $GPU in
-  nvidia) pacman -S --noconfirm nvidia nvidia-utils ;;
-  amd)    pacman -S --noconfirm mesa xf86-video-amdgpu ;;
-  intel)  pacman -S --noconfirm mesa xf86-video-intel intel-media-driver ;;
+echo "Installing terminal emulator..."
+echo "1) GNOME Terminal 2) Konsole 3) XFCE4 Terminal 4) LXTerminal 5) XTerm"
+read -r terminal_choice
+case "$terminal_choice" in
+  1) pacman -Sy --noconfirm gnome-terminal ;;
+  2) pacman -Sy --noconfirm konsole ;;
+  3) pacman -Sy --noconfirm xfce4-terminal ;;
+  4) pacman -Sy --noconfirm lxterminal ;;
+  5) pacman -Sy --noconfirm xterm ;;
+  *) echo "Invalid choice, skipping terminal emulator installation." ;;
 esac
 
-#----- Xorg base ------------------------------------------------------------
-pacman -S --noconfirm xorg
+echo "Installing yay..."
+pacman -Sy --noconfirm git base-devel
+git clone https://aur.archlinux.org/yay.git
+cd yay || exit
+makepkg -si --noconfirm
 
-#----- desktop environment --------------------------------------------------
-declare -A DEPKG=(
-  [gnome]="gnome"
-  [plasma]="plasma kde-applications"
-  [xfce]="xfce4 xfce4-goodies"
-  [cinnamon]="cinnamon"
-  [mate]="mate mate-extra"
-)
-pacman -S --noconfirm ${DEPKG[$DE]}
+echo "Installing Google Chrome..."
+yay -Sy --noconfirm google-chrome
 
-#----- display manager ------------------------------------------------------
-case $DM in
-  gdm)    pacman -S --noconfirm gdm    && systemctl enable gdm ;;
-  sddm)   pacman -S --noconfirm sddm   && systemctl enable sddm ;;
-  lightdm)pacman -S --noconfirm lightdm lightdm-gtk-greeter && systemctl enable lightdm ;;
-  lxdm)   pacman -S --noconfirm lxdm   && systemctl enable lxdm ;;
-  ly)     pacman -S --noconfirm ly     && systemctl enable ly ;;
-esac
+echo "Install Steam and ProtonUp-Qt? (yes/no)"
+read -r steam_choice
+if [ "$steam_choice" == "yes" ]; then
+  yay -Sy --noconfirm steam protonup-qt
+fi
 
-#----- autologin (only for getty or gdm/sddm) -------------------------------
-if [[ $AUTOLOGIN == y ]]; then
-  if [[ $DM == gdm ]]; then
-    mkdir -p /var/lib/AccountsService/users
-    cat > /var/lib/AccountsService/users/$USERNAME <<EOF
-[User]
-SystemAccount=false
-AutomaticLogin=true
-AutomaticLoginTimeout=0
-EOF
-  elif [[ $DM ==
+echo "System setup complete!"
