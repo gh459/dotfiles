@@ -1,100 +1,141 @@
-#!/bin/bash
-# chroot_setup.sh - Arch Linux System Configuration Script
+#!/usr/bin/env bash
+# ------------------------------------------------------------
+# Arch Linux automated installer – chroot_setup.sh
+# ------------------------------------------------------------
+set -euo pipefail
+source /root/install.conf
 
-# Stop on any error
-set -e
-
-# Load variables from install.sh
-source /install_vars.sh
-
-echo "INFO (chroot): Setting up timezone and locale..."
-# --- Timezone and Locale ---
+echo "==> Setting timezone ..."
 ln -sf /usr/share/zoneinfo/Asia/Tokyo /etc/localtime
 hwclock --systohc
-sed -i 's/^#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
-sed -i 's/^#ja_JP.UTF-8 UTF-8/ja_JP.UTF-8 UTF-8/' /etc/locale.gen
+
+echo "==> Generating locale ..."
+sed -i 's/^#ja_JP.UTF-8/ja_JP.UTF-8/' /etc/locale.gen
 locale-gen
 echo "LANG=ja_JP.UTF-8" > /etc/locale.conf
 echo "KEYMAP=jp106" > /etc/vconsole.conf
 
-echo "INFO (chroot): Setting up hostname..."
-# --- Hostname ---
+echo "==> Setting hostname ..."
 echo "$HOSTNAME" > /etc/hostname
-cat <<EOF >> /etc/hosts
-127.0.0.1   localhost
-::1         localhost
-127.0.1.1   $HOSTNAME.localdomain $HOSTNAME
+cat >> /etc/hosts <<EOF
+127.0.0.1 localhost
+::1       localhost
+127.0.1.1 $HOSTNAME.localdomain $HOSTNAME
 EOF
 
-echo "INFO (chroot): Setting root password (locking account)..."
-# Set root password (same as user for simplicity, but locked)
-echo "root:$USER_PASSWORD" | chpasswd
-passwd -l root
-
-echo "INFO (chroot): Creating user $USERNAME..."
-# --- User Setup ---
+echo "==> Creating user ..."
 useradd -m -G wheel -s /bin/bash "$USERNAME"
-echo "$USERNAME:$USER_PASSWORD" | chpasswd
-# Allow users in wheel group to use sudo
-sed -i 's/^# %wheel ALL=(ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
+echo "Set password for $USERNAME"
+passwd "$USERNAME"
+echo "%wheel ALL=(ALL) ALL" | tee /etc/sudoers.d/99_wheel
 
-echo "INFO (chroot): Installing bootloader (GRUB)..."
-# --- Bootloader ---
-grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=ARCH --recheck
-grub-mkconfig -o /boot/grub/grub.cfg
+# ------------------------------------------------------------
+# GPU driver
+# ------------------------------------------------------------
+case "$GPUSEL" in
+  1) pacman -S --noconfirm nvidia nvidia-utils lib32-nvidia-utils ;;
+  2) pacman -S --noconfirm mesa vulkan-radeon lib32-mesa ;;
+  3) pacman -S --noconfirm mesa vulkan-intel lib32-mesa ;;
+esac
 
-echo "INFO (chroot): Enabling NetworkManager..."
-systemctl enable NetworkManager
+# ------------------------------------------------------------
+# Xorg & Desktop
+# ------------------------------------------------------------
+pacman -S --noconfirm xorg xorg-xinit
 
-echo "INFO (chroot): Installing graphics drivers and desktop environment..."
-# --- Graphics and Desktop ---
-pacman -S --noconfirm $GFX_PACKAGE $DE_PACKAGES
+case "$DESEL" in
+  1) pacman -S --noconfirm gnome gnome-tweaks ;;
+  2) pacman -S --noconfirm plasma kde-applications ;;
+  3) pacman -S --noconfirm xfce4 xfce4-goodies ;;
+  4) pacman -S --noconfirm cinnamon ;;
+  5) pacman -S --noconfirm mate mate-extra ;;
+esac
 
-echo "INFO (chroot): Enabling display manager ($DM)..."
-systemctl enable "$DM.service"
+# ------------------------------------------------------------
+# Display manager
+# ------------------------------------------------------------
+case "$DMSEL" in
+  1) pacman -S --noconfirm gdm && systemctl enable gdm ;;
+  2) pacman -S --noconfirm sddm && systemctl enable sddm ;;
+  3) pacman -S --noconfirm lightdm lightdm-gtk-greeter && systemctl enable lightdm ;;
+  4) pacman -S --noconfirm lxdm && systemctl enable lxdm ;;
+  5) ;; # none
+esac
 
-# --- Autologin Configuration ---
-if [[ "$AUTOLOGIN" == "yes" ]]; then
-    echo "INFO (chroot): Configuring automatic login for $DM..."
-    case $DM in
-        "gdm")
-            mkdir -p /etc/gdm
-            cat > /etc/gdm/custom.conf <<EOF
-[daemon]
-AutomaticLoginEnable=True
-AutomaticLogin=$USERNAME
+# ------------------------------------------------------------
+# Preferred shell & terminal
+# ------------------------------------------------------------
+case "$SHELSEL" in
+  2) pacman -S --noconfirm zsh && chsh -s /bin/zsh "$USERNAME" ;;
+  3) pacman -S --noconfirm fish && chsh -s /usr/bin/fish "$USERNAME" ;;
+  4) pacman -S --noconfirm tcsh && chsh -s /bin/tcsh "$USERNAME" ;;
+  5) pacman -S --noconfirm nushell && chsh -s /usr/bin/nu "$USERNAME" ;;
+esac
+
+case "$TERMSEL" in
+  1) pacman -S --noconfirm gnome-terminal ;;
+  2) pacman -S --noconfirm konsole ;;
+  3) pacman -S --noconfirm xfce4-terminal ;;
+  4) pacman -S --noconfirm tilix ;;
+  5) pacman -S --noconfirm alacritty ;;
+esac
+
+# ------------------------------------------------------------
+# Autologin
+# ------------------------------------------------------------
+if [[ $AUTOLOGIN =~ ^[yY]$ ]]; then
+  if [[ $DMSEL -eq 5 ]]; then
+    mkdir -p /etc/systemd/system/getty@tty1.service.d
+    cat > /etc/systemd/system/getty@tty1.service.d/override.conf <<EOF
+[Service]
+ExecStart=
+ExecStart=-/usr/bin/agetty --autologin $USERNAME --noclear %I \$TERM
 EOF
-            ;;
-        "sddm")
-            mkdir -p /etc/sddm.conf.d
-            cat > /etc/sddm.conf.d/autologin.conf <<EOF
+    systemctl enable getty@tty1
+  else
+    # DM autologin config (GDM & SDDM shown)
+    if [[ $DMSEL -eq 1 ]]; then
+      mkdir -p /var/lib/gdm
+      echo "[daemon]" > /etc/gdm/custom.conf
+      echo "AutomaticLoginEnable=True" >> /etc/gdm/custom.conf
+      echo "AutomaticLogin=$USERNAME" >> /etc/gdm/custom.conf
+    fi
+    if [[ $DMSEL -eq 2 ]]; then
+      mkdir -p /etc/sddm.conf.d
+      cat > /etc/sddm.conf.d/autologin.conf <<EOF
 [Autologin]
 User=$USERNAME
 Session=plasma.desktop
 EOF
-            ;;
-        "lightdm")
-            sed -i "s/^#autologin-user=.*/autologin-user=$USERNAME/" /etc/lightdm/lightdm.conf
-            sed -i "s/^#autologin-session=.*/autologin-session=lightdm-xsession/" /etc/lightdm/lightdm.conf
-            ;;
-    esac
+    fi
+  fi
 fi
 
+# ------------------------------------------------------------
+# yay & AUR packages
+# ------------------------------------------------------------
+echo "==> Installing yay ..."
+pacman -S --noconfirm --needed git base-devel
+sudo -u "$USERNAME" bash -c "
+  cd /home/$USERNAME
+  git clone https://aur.archlinux.org/yay.git
+  cd yay && makepkg -si --noconfirm
+" # yay install[8]
 
-# --- Install yay and additional packages as the new user ---
-echo "INFO (chroot): Installing AUR helper (yay)..."
-sudo -u "$USERNAME" bash -c 'git clone https://aur.archlinux.org/yay.git /tmp/yay && cd /tmp/yay && makepkg -si --noconfirm && cd / && rm -rf /tmp/yay'
+echo "==> Installing Google Chrome ..."
+sudo -u "$USERNAME" yay -S --noconfirm google-chrome # AUR[4]
 
-echo "INFO (chroot): Installing Google Chrome..."
-sudo -u "$USERNAME" yay -S --noconfirm google-chrome[3]
-
-if [[ "$INSTALL_STEAM" == "yes" ]]; then
-    echo "INFO (chroot): Installing Steam and ProtonUp-Qt..."
-    # Enable multilib repository for Steam
-    sed -i "/\[multilib\]/,/Include/"'s/^#//' /etc/pacman.conf
-    pacman -Sy --noconfirm
-    pacman -S --noconfirm steam
-    sudo -u "$USERNAME" yay -S --noconfirm protonup-qt[5]
+if [[ $WANT_STEAM =~ ^[yY]$ ]]; then
+  echo "==> Enabling multilib & installing Steam ..."
+  sed -i '/\[multilib\]/,/Include/{s/^#//}' /etc/pacman.conf
+  pacman -Sy --noconfirm steam # Steam needs multilib[6]
 fi
 
-echo "INFO (chroot): System configuration finished."
+if [[ $WANT_PROTON =~ ^[yY]$ ]]; then
+  echo "==> Installing ProtonUp-Qt ..."
+  sudo -u "$USERNAME" yay -S --noconfirm protonup-qt # AUR[7]
+fi
+
+systemctl enable NetworkManager
+
+echo "==> Chroot configuration finished."
